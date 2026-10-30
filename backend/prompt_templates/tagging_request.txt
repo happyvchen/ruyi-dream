@@ -1,0 +1,3 @@
+{{assembly.garment_image_selection}}
+
+{{assembly.ai_tagging}}

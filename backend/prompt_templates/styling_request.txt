@@ -1,0 +1,3 @@
+{{assembly.hero_image_selection}}
+
+{{assembly.ai_styling}}

@@ -49,6 +49,21 @@ def optimizer_input(packages: dict[str, dict[str, Any]]) -> dict[str, Any]:
     ]}
 
 
+def optimizer_mapped_input(packages: dict[str, dict[str, Any]]) -> dict[str, Any]:
+    """Same attachment numbering for local preview and sending; no image I/O."""
+    inputs = optimizer_input(packages)
+    manifest, seen = [], {}
+    for shot in inputs["shots"]:
+        for reference, item in zip(shot["references"], packages[shot["shotId"]]["imageInputs"]):
+            identity = optimizer_reference_identity(item)
+            if identity not in seen:
+                seen[identity] = len(seen) + 1
+                manifest.append({"visionImageIndex": seen[identity], "role": item["role"]})
+            reference["visionImageIndex"] = seen[identity]
+    inputs["imageManifest"] = manifest
+    return inputs
+
+
 def parse_optimized_prompts(raw: dict[str, Any], packages: dict[str, dict[str, Any]]) -> dict[str, dict[str, str]]:
     """按镜头取回模型正文，不判断内容、不拼接或改写提示词。"""
     try:

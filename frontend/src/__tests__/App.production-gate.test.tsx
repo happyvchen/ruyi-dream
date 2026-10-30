@@ -13,6 +13,7 @@ const apiMock = vi.hoisted(() => ({
   createPose: vi.fn(),
   recognizePose: vi.fn(),
   replacePoseImage: vi.fn(),
+  updatePoseFrameLayout: vi.fn(),
   selectPoses: vi.fn(),
   session: vi.fn(),
   login: vi.fn(),
@@ -682,14 +683,14 @@ describe('production gate app shell and page controls', () => {
     window.history.replaceState(null, '', '/prompts')
     render(<App />)
     await userEvent.click(await screen.findByRole('button', { name: 'Prompt 维护' }))
-    await userEvent.click(await screen.findByRole('button', { name: '填入 imagegen 原文摘录' }))
+    await userEvent.click(await screen.findByRole('button', { name: '填入优化参考规则' }))
     expect(screen.getByRole('textbox', { name: '成片提示词优化规则正文' })).toHaveValue('建议系统规则')
     expect(screen.queryByRole('heading', { name: '占位符' })).not.toBeInTheDocument()
     expect(screen.queryByRole('heading', { name: '校验' })).not.toBeInTheDocument()
     await userEvent.click(screen.getByRole('checkbox', { name: /启用成片提示词优化/ }))
     await userEvent.click(screen.getByRole('button', { name: '保存' }))
     await waitFor(() => expect(apiMock.updatePromptConfig).toHaveBeenCalledWith('assembly.final_prompt_optimizer', '建议系统规则', true))
-    expect(screen.queryByRole('button', { name: '刷新预览' })).not.toBeInTheDocument()
+    expect(screen.getByRole('button', { name: '刷新预览' })).toBeInTheDocument()
     expect(apiMock.testPromptOptimization).not.toHaveBeenCalled()
     await userEvent.selectOptions(screen.getByRole('combobox'), '41')
     await userEvent.click(screen.getByRole('button', { name: '测试优化（仅 LLM）' }))
@@ -723,7 +724,7 @@ describe('production gate app shell and page controls', () => {
     window.history.replaceState(null, '', '/prompt-maintenance')
     render(<App />)
     expect(await screen.findByRole('textbox', { name: '成片提示词优化规则正文' })).toHaveValue('旧规则')
-    await userEvent.click(screen.getByRole('button', { name: '填入 imagegen 原文摘录' }))
+    await userEvent.click(screen.getByRole('button', { name: '填入优化参考规则' }))
     expect(screen.getByRole('textbox', { name: '成片提示词优化规则正文' })).toHaveValue('原文摘录')
     expect(screen.getByRole('button', { name: '保存' })).toBeEnabled()
     expect(apiMock.updatePromptConfig).not.toHaveBeenCalled()
@@ -2932,6 +2933,30 @@ describe('pose library and the fourth studio stage', () => {
     expect(within(dialog).getByText('轻步行走')).toBeInTheDocument()
     expect(apiMock.recognizePose).not.toHaveBeenCalled()
     expect(apiMock.selectPoses).not.toHaveBeenCalled()
+  })
+
+  it('shows generic layout facts and corrects legacy tags without AI', async () => {
+    apiMock.listPoses.mockResolvedValue({ ...emptyPage, items: [pose], total: 1 })
+    const corrected = { ...pose, aiTags: { ...pose.aiTags, 画面布局: '同人多视图', 视图组合: '正面 + 侧面 + 背面' } }
+    apiMock.updatePoseFrameLayout.mockImplementation(async () => {
+      apiMock.listPoses.mockResolvedValue({ ...emptyPage, items: [corrected], total: 1 })
+      return { item: corrected }
+    })
+    window.history.replaceState(null, '', '/poses')
+    render(<App />)
+    expect(await screen.findByText('画面布局待补录')).toBeInTheDocument()
+    fireEvent.click(screen.getByRole('button', { name: '详情' }))
+    const dialog = screen.getByRole('dialog', { name: '姿势详情' })
+    fireEvent.change(within(dialog).getByLabelText('画面布局'), { target: { value: '同人多视图' } })
+    fireEvent.change(within(dialog).getByLabelText('视图组合'), { target: { value: '正面 + 侧面 + 背面' } })
+    fireEvent.click(within(dialog).getByRole('button', { name: '保存布局' }))
+    await waitFor(() => expect(apiMock.updatePoseFrameLayout).toHaveBeenCalledWith(91, '同人多视图', '正面 + 侧面 + 背面'))
+    await waitFor(() => expect(within(dialog).getByRole('button', { name: '保存布局' })).toBeDisabled())
+    expect(apiMock.recognizePose).not.toHaveBeenCalled()
+    expect(apiMock.selectPoses).not.toHaveBeenCalled()
+    fireEvent.click(within(dialog).getByRole('button', { name: '关闭姿势详情' }))
+    expect(await screen.findByText('同人多视图')).toBeInTheDocument()
+    expect(screen.getByText('正面 + 侧面 + 背面')).toBeInTheDocument()
   })
 
   it('silently discovers other users poses, preserves the DOM, and pauses when hidden or away', async () => {

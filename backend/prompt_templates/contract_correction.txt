@@ -1,0 +1,5 @@
+{{runtime.original_prompt}}
+
+【上一次返回的协议纠错】
+上一次返回未通过系统契约校验：{{runtime.contract_error}}
+请重新检查全部必需顶层字段及字段类型，只输出符合当前 Prompt 约定的严格 JSON；不要输出 Markdown、解释文字或额外包裹。

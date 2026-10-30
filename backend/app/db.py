@@ -50,6 +50,11 @@ MIGRATIONS: tuple[tuple[str, str, str], ...] = (
     ("083", "published_image_versions", "migration_published_image_versions"),
     ("084", "repair_published_image_versions", "migration_published_image_versions"),
     ("085", "collection_revisions", "migration_collection_revisions"),
+    ("086", "pose_frame_layout_prompts", "migration_pose_frame_layout_prompts"),
+    ("087", "objective_pose_tags", "migration_objective_pose_tags"),
+    ("088", "reconstructable_pose_tags", "migration_reconstructable_pose_tags"),
+    ("089", "transparent_prompt_calls", "migration_transparent_prompt_calls"),
+    ("090", "pose_shot_sections", "migration_pose_shot_sections"),
 )
 
 # Prompt 维护页只保留当前运行链路会读取的配置槽。Prompt 正文不写死在代码里；
@@ -60,11 +65,17 @@ PROMPT_CONFIG_CATALOG: tuple[tuple[str, str, str, str, int], ...] = (
     ("assembly.ai_tagging", "assembly", "AI 打标", "搭配服装入库后的图片理解和标签识别 Prompt；运行时与图片挑选/排序合并调用。", 100),
     ("assembly.hero_image_selection", "assembly", "主推款图片挑选/排序", "AI 摄影棚主推款图片挑选和排序 Prompt；运行时与 AI 选搭合并调用。", 105),
     ("assembly.ai_styling", "assembly", "AI 选搭", "AI Stylist 选搭 Prompt，含主推款理解、搭配选择和质量判断；运行时与主推款图片挑选/排序合并调用。", 110),
-    ("assembly.pose_tagging", "assembly", "姿势识别", "识别姿势动作、神态、展示影响与执行条件。", 115),
-    ("assembly.pose_selection", "assembly", "姿势选搭", "结合商品图片、姿势标签和镜头要求，一次初筛直接选定五个不同姿势。", 120),
+    ("assembly.pose_tagging", "assembly", "姿势识别", "完整记录可还原姿态的画面、肢体关系、视线与表情，去除冗余评价。", 115),
+    ("assembly.pose_selection", "assembly", "姿势选搭", "结合商品图片、姿势标签和成片 Prompt 的「机位&景别」章节，一次初筛直接选定五个不同姿势。", 120),
     ("assembly.final_image_top", "assembly", "生成成片 · 上装/针织/外套", "Image-2.5 Sunburst 上装类固定五镜头成片 Prompt。", 150),
     ("assembly.final_image_bottom", "assembly", "生成成片 · 裤装/半身裙", "Image-2.5 Sunburst 下装类固定五镜头成片 Prompt。", 160),
     ("assembly.final_image_one_piece", "assembly", "生成成片 · 连衣裙/连体/套装", "Image-2.5 Sunburst 连衣裙/连体/套装固定五镜头成片 Prompt。", 170),
+    ("assembly.tagging_request", "assembly", "搭配服装识别 · 实际请求", "本次识别实际发送的完整正文，通过显式占位符引用挑图与打标规则。", 101),
+    ("assembly.styling_request", "assembly", "AI 选搭 · 实际请求", "本次选搭实际发送的完整正文，通过显式占位符引用挑图与选搭规则。", 111),
+    ("assembly.final_prompt_optimizer_input", "assembly", "成片提示词优化 · 用户消息", "与优化系统规则一起发送；镜头正文和图片编号仅通过占位符注入。", 181),
+    ("assembly.contract_correction", "assembly", "返回格式纠错", "格式重问时实际发送的完整正文；引用原始请求与校验错误。", 190),
+    ("assembly.image_retry", "assembly", "单张成片调整", "单张重生有新增要求时实际发送的完整正文；原图请求正文保持冻结。", 191),
+    ("assembly.reference_transport", "assembly", "历史参考图编号映射", "历史请求超过参考图上限时的完整正文，说明来源参考板编号。", 192),
     ("assembly.final_prompt_optimizer", "assembly", "成片提示词优化规则", "整理五镜头成片提示词的系统规则；启用后仅影响新结果集。", 180),
 )
 
@@ -493,6 +504,11 @@ def run_migrations(db: sqlite3.Connection) -> None:
         for row in db.execute("SELECT version FROM schema_migrations").fetchall()
     }
     migration_functions = {
+        "migration_transparent_prompt_calls": migration_transparent_prompt_calls,
+        "migration_pose_shot_sections": migration_pose_shot_sections,
+        "migration_pose_frame_layout_prompts": migration_pose_frame_layout_prompts,
+        "migration_objective_pose_tags": migration_objective_pose_tags,
+        "migration_reconstructable_pose_tags": migration_reconstructable_pose_tags,
         "migration_pose_library_and_selection": migration_pose_library_and_selection,
         "migration_single_image_poses": migration_single_image_poses,
         "migration_final_prompt_optimization": migration_final_prompt_optimization,
@@ -1994,3 +2010,142 @@ def migration_collection_revisions(db: sqlite3.Connection) -> None:
             AFTER {event} ON media_assets{condition} BEGIN
             UPDATE collection_revisions SET revision = revision + 1;
             END""")
+
+
+# Only replace the exact previous reference texts; custom/empty configurations stay intact.
+POSE_FRAME_LAYOUT_LEGACY_DIGESTS: dict[str, str] = {
+    "pose_tagging": "26ad5d83d2d2a58b1ae0e54f3a50827c77d3dd827c610c4c15d164d48443457e",
+    "pose_selection": "29f316169d5233501cc918e7bb70a920ef786af99e024a506431931a935ed02d",
+    "final_image_top": "3e77340754d7db311beedcdeacc369f0ba366f185862e01baeafc784d48c4c71",
+    "final_image_bottom": "005c46154d19cfe5ec4600a798f0b8386c9fd01b8825158faed52a93b3b83bc1",
+    "final_image_one_piece": "f0847e1e28cefd0c7f682f4cf33d463a97c52eae95b9721ff1ff9d738f2bf528",
+    "final_prompt_optimizer": "82417ae9436d92ca34ce3c40fd9ab91e6124da01a1526e3a2036876133602bc3",
+}
+
+
+def migration_pose_frame_layout_prompts(db: sqlite3.Connection) -> None:
+    if not table_exists(db, "prompt_configs"):
+        return
+    for template, digest in POSE_FRAME_LAYOUT_LEGACY_DIGESTS.items():
+        key = f"assembly.{template}"
+        row = db.execute("SELECT content FROM prompt_configs WHERE key = ?", (key,)).fetchone()
+        if not row or hashlib.sha256(str(row["content"] or "").strip().encode()).hexdigest() != digest:
+            continue
+        content = (Path(__file__).resolve().parents[1] / "prompt_templates" / f"{template}.txt").read_text(encoding="utf-8")
+        db.execute("UPDATE prompt_configs SET content = ?, updated_at = ? WHERE key = ?", (content, now_iso(), key))
+
+
+# References saved after layout support but before the concise factual tag contract.
+OBJECTIVE_POSE_LEGACY_DIGESTS: dict[str, str] = {
+    "pose_tagging": "e9cbdc475126df768d89cb12743423f0319185572f7a1e42106421f161eecf46",
+    "pose_selection": "361b1e272607ef44e0891b87a5bd27343b08c1cfa9bd654329048491ee501428",
+}
+
+
+def migration_objective_pose_tags(db: sqlite3.Connection) -> None:
+    if not table_exists(db, "prompt_configs"):
+        return
+    for template, digest in OBJECTIVE_POSE_LEGACY_DIGESTS.items():
+        key = f"assembly.{template}"
+        row = db.execute("SELECT content FROM prompt_configs WHERE key = ?", (key,)).fetchone()
+        if not row or hashlib.sha256(str(row["content"] or "").strip().encode()).hexdigest() != digest:
+            continue
+        content = (Path(__file__).resolve().parents[1] / "prompt_templates" / f"{template}.txt").read_text(encoding="utf-8")
+        db.execute("UPDATE prompt_configs SET content = ?, updated_at = ? WHERE key = ?", (content, now_iso(), key))
+
+
+# Exact concise references, before completeness became the primary criterion.
+RECONSTRUCTABLE_POSE_LEGACY_DIGESTS: dict[str, str] = {
+    "pose_tagging": "b70bc62f4de4a0a71426f11c1c04b73559c2a4485ad92aa359886c1b8bdff25a",
+    "pose_selection": "c4197499a0fcfdb33f0fbb0f2afffe951cfb79df8609903a654bcdbc6525bf2c",
+}
+
+
+def migration_reconstructable_pose_tags(db: sqlite3.Connection) -> None:
+    if not table_exists(db, "prompt_configs"):
+        return
+    for template, digest in RECONSTRUCTABLE_POSE_LEGACY_DIGESTS.items():
+        key = f"assembly.{template}"
+        row = db.execute("SELECT content FROM prompt_configs WHERE key = ?", (key,)).fetchone()
+        if not row or hashlib.sha256(str(row["content"] or "").strip().encode()).hexdigest() != digest:
+            continue
+        content = (Path(__file__).resolve().parents[1] / "prompt_templates" / f"{template}.txt").read_text(encoding="utf-8")
+        db.execute("UPDATE prompt_configs SET content = ?, updated_at = ? WHERE key = ?", (content, now_iso(), key))
+
+
+def migration_transparent_prompt_calls(db: sqlite3.Connection) -> None:
+    """Move existing request wrappers into editable configuration, then slim facts.
+
+    This is a one-time transfer of the former code-owned protocol, not a runtime
+    fallback. Existing customized slots are never overwritten. No AI/media I/O.
+    """
+    from .call_facts import slim_database_facts
+    if not table_exists(db, "prompt_configs"):
+        return
+    ensure_prompt_config_catalog(db)
+    for key, filename in (
+        ("assembly.tagging_request", "tagging_request"),
+        ("assembly.styling_request", "styling_request"),
+        ("assembly.final_prompt_optimizer_input", "optimizer_input"),
+        ("assembly.contract_correction", "contract_correction"),
+        ("assembly.image_retry", "image_retry"),
+        ("assembly.reference_transport", "reference_transport"),
+    ):
+        content = (Path(__file__).resolve().parents[1] / "prompt_templates" / f"{filename}.txt").read_text(encoding="utf-8")
+        db.execute("UPDATE prompt_configs SET content = ?, updated_at = ? WHERE key = ? AND content = ''",
+                   (content, now_iso(), key))
+    # Interrupted old result sets must keep their frozen rules, but need the
+    # previously code-owned user-message wrapper to continue under the new code.
+    legacy_input = (Path(__file__).resolve().parents[1] / "prompt_templates" / "optimizer_input.txt").read_text(encoding="utf-8")
+    preparations = db.execute("SELECT id, prompt_preparation_json FROM generation_result_sets WHERE prompt_preparation_json IS NOT NULL") if table_has_column(db, "generation_result_sets", "prompt_preparation_json") else []
+    for result in preparations:
+        try:
+            preparation = json.loads(result["prompt_preparation_json"])
+        except (TypeError, ValueError):
+            continue
+        if isinstance(preparation, dict) and isinstance(preparation.get("configRows"), dict):
+            if "assembly.final_prompt_optimizer_input" not in preparation["configRows"]:
+                preparation["configRows"]["assembly.final_prompt_optimizer_input"] = {"content": legacy_input, "group_type": "assembly"}
+                db.execute("UPDATE generation_result_sets SET prompt_preparation_json = ? WHERE id = ?", (dumps(preparation), result["id"]))
+    report = slim_database_facts(db)
+    # Store only size/count facts; never another copy of the removed snapshots.
+    if table_exists(db, "event_logs"):
+        db.execute("INSERT INTO event_logs (entity_type, entity_id, event_type, payload_json, created_at) VALUES (?, NULL, ?, ?, ?)",
+                   ("database", "call_facts_compacted", dumps(report), now_iso()))
+
+
+def migration_pose_shot_sections(db: sqlite3.Connection) -> None:
+    """Adapt editable configuration only; historical executions stay verbatim."""
+    from .prompt_render import extract_prompt_section
+    if not table_exists(db, "prompt_configs"):
+        return
+    row = db.execute("SELECT content FROM prompt_configs WHERE key = 'assembly.final_image_bottom'").fetchone()
+    if row and row["content"]:
+        original = str(row["content"])
+        content = original.replace("## 当前镜头：腰臀至大腿中段近景", "## 机位&景别")
+        # Only fill the known missing shot. Never overwrite any existing shot-2
+        # condition (including custom negative branches) or guess section bounds.
+        if not re.search(r"\{\{\s*[#^/]runtime\.is_shot_2\s*\}\}", content):
+            try:
+                section = extract_prompt_section(content, "机位&景别")
+            except ValueError:
+                section = ""
+            if section:
+                template = (Path(__file__).resolve().parents[1] / "prompt_templates" / "final_image_bottom.txt").read_text(encoding="utf-8")
+                branch = re.search(r"\{\{#runtime\.is_shot_2\}\}(.*?)\{\{/runtime\.is_shot_2\}\}", template, re.S)
+                if not branch:
+                    raise ValueError("下装参考模板缺少镜头 2")
+                body = extract_prompt_section(branch[1], "机位&景别")
+                block = "{{#runtime.is_shot_2}}" + body + "\n{{/runtime.is_shot_2}}"
+                before = re.search(r"\{\{\s*#runtime\.is_shot_3\s*\}\}", section)
+                offset = before.start() if before else 0
+                content = content.replace(section, section[:offset] + block + section[offset:], 1)
+        if content != original:
+            db.execute("UPDATE prompt_configs SET content = ?, updated_at = ? WHERE key = 'assembly.final_image_bottom'", (content, now_iso()))
+    row = db.execute("SELECT content FROM prompt_configs WHERE key = 'assembly.pose_selection'").fetchone()
+    if row and row["content"]:
+        original = str(row["content"])
+        content = original.replace("五个镜头要求（来自冻结的成片 Prompt）", "五个镜头要求（仅来自冻结成片 Prompt 的「机位&景别」章节）")
+        content = content.replace("逐镜头重点参考成片要求中的“机位&景别”", "逐镜头依据输入的“机位&景别”")
+        if content != original:
+            db.execute("UPDATE prompt_configs SET content = ?, updated_at = ? WHERE key = 'assembly.pose_selection'", (content, now_iso()))

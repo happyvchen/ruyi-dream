@@ -135,3 +135,31 @@ GenerationTask
 ## 页面集合版本（迁移 085）
 
 `collection_revisions(scope TEXT PRIMARY KEY, revision INTEGER NOT NULL DEFAULT 0)` 保存 `poses / garments / records / models` 四个集合版本。相关业务表的 INSERT/UPDATE/DELETE 触发器在原事务内递增计数；UPDATE 排除仅 `updated_at`、lease 心跳及无变化写入。媒体缩略图、预览、状态或元信息改变时使集合失效。只读版本检查为主键单行查询，不扫描素材或生成任务列表；版本不是业务数据历史或事件日志。
+
+## 画面布局规则升级（迁移 086）
+
+无表结构变化。按旧正文 SHA-256 精确匹配升级姿势识别、姿势选搭、三类成片和提示词整理配置，自定义与空正文保留。画面布局、视图组合、参考景别和视图说明仍存于 poses.ai_tags_json 并随选择冻结；不回填无法从旧数据确认的视觉事实，不调用 provider，不更改历史选择或成片。
+
+## 客观姿势标签（迁移087）
+
+无表结构变化。精确匹配086阶段姿势识别和选姿参考正文摘要后，升级为简洁客观标签规则；空配置和自定义正文不变。标签仍完整保存在ai_tags_json，不批量删除旧评价字段、不改历史快照、不触发识别。
+
+## 姿态文字还原要求（迁移088）
+
+无表结构变化。按087阶段识别与选姿参考正文的摘要精确升级，强调可见部位与空间关系的完整覆盖及动作传递保真。自定义配置和历史数据不改写，不触发provider。
+
+## 089：Prompt 实际请求与历史记录瘦身
+
+不新增业务表，不改任务、图片、版本和素材主键。新增六个 Prompt 槽：`assembly.tagging_request`、`assembly.styling_request`、`assembly.final_prompt_optimizer_input`、`assembly.contract_correction`、`assembly.image_retry`、`assembly.reference_transport`。升级时从对应文本文件迁入原先由代码持有的请求结构；仅填充空槽，不替换已保存正文。
+
+- `generation_attempts.request_snapshot_json`：保留实际 system、每批 `batchRequests[].prompt`、批次镜头和图片附件。删除与第一批相同的顶层 prompt；sourcePackages 中与批次 sourcePrompt 相等的正文可省略，由批次事实还原。可执行图片包不保存 `promptConfigSnapshot` / `promptConfigContent`，保留正文、来源图片、runtime 和版本哈希。
+- `generation_attempts.response_snapshot_json`：保留 `batchResponses[].raw_text`，删除与末批完全相等的顶层 raw_text，以及与合法批次原始 JSON 完全一致的 shots 解析副本。无法证明相等时保留。姿势响应 plan 中的配置副本移除，姿势业务表中的冻结配置保留。
+- `generation_image_versions.request_snapshot_json`、`generation_result_images_new.execution_snapshot_json`：移除可执行包中的重复模板配置，保留重生正文、所有参考图、用户调整基准及恢复信息。
+- `generation_result_sets.prompt_preparation_json`：保留共享 configRows、准备状态、已完成镜头的正文及来源；packages 内不再复制共享配置。升级为旧结果集补入原代码协议对应的优化用户消息模板，不重写其摄影规则或优化结果。
+- 迁移分批读取，每批最多 100 条；在迁移事务中更新，与 schema_migrations 089 一同提交。可重复运行；非法 JSON 保留并计数。event_logs 的 `call_facts_compacted` 仅记录行数、前后字节数和跳过数量。
+
+历史瘦身不删除原始媒体或生成结果，不改 provider ID、重试预算、任务状态或已发送文本。升级脚本先备份，再迁移和 VACUUM；回滚需恢复升级前数据库及匹配代码。
+
+## 090：姿势选搭仅引用机位与景别
+
+不变更表结构，不改历史 attempts、姿势选择、结果集或执行快照。只调整当前可维护配置：下装旧独立镜头 2 的「当前镜头：腰臀至大腿中段近景」标题改为「机位&景别」；下装已有明确章节但完全缺少镜头 2 条件时，从参考模板迁入该镜头正文，依据现有品类图位规则补齐。已有镜头 2、自定义其他正文、空配置和无法明确定位的章节均不覆盖；后两者在使用时明确报配置错误。姿势选搭说明同步为仅引用该章节。迁移幂等，无 AI 或媒体 I/O，现有离线升级脚本会自动执行。

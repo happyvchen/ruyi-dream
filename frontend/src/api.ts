@@ -248,6 +248,17 @@ export type AICallRecord = AIOperation & {
   responseFacts?: Record<string, unknown>
   modelInput?: Record<string, unknown>
   modelOutput?: Record<string, unknown>
+  modelBatches?: ModelCallBatch[]
+}
+
+export type ModelCallBatch = {
+  batchIndex: number
+  shotIds: string[]
+  systemInstruction?: string
+  prompt: string
+  images?: Record<string, unknown>[]
+  output?: string | null
+  hasResponse?: boolean
 }
 
 export type TaskStatus = {
@@ -284,7 +295,7 @@ export type PoseSelection = {
   stylingId: number
   summary: string
   createdAt: string
-  shots: { shotIndex: number; code: string; name: string; reason: string; direction: string; sourceAvailable: boolean; pose: MediaAsset | null; background: MediaAsset | null }[]
+  shots: { shotIndex: number; code: string; name: string; aiTags?: Record<string, unknown>; reason: string; direction: string; sourceAvailable: boolean; pose: MediaAsset | null; background: MediaAsset | null }[]
 }
 
 export type GenerationTask = {
@@ -643,6 +654,7 @@ export type PromptConfigPreview = {
   rendered: string
   historicalPrompt?: string | null
   diagnostics: PromptConfigDiagnostics
+  modelBatches?: ModelCallBatch[]
 }
 
 export type PromptOptimizationTest = {
@@ -885,6 +897,7 @@ export const api = {
     return request<{ item: Pose }>('/api/poses', { method: 'POST', body: form })
   },
   updatePose: (id: number, name: string) => request<{ item: Pose }>(`/api/poses/${id}`, { method: 'PATCH', body: JSON.stringify({ name }) }),
+  updatePoseFrameLayout: (id: number, frameLayout: string, viewComposition: string) => request<{ item: Pose }>(`/api/poses/${id}`, { method: 'PATCH', body: JSON.stringify({ frameLayout, viewComposition }) }),
   replacePoseImage: (id: number, file: File) => {
     const form = new FormData()
     form.append('files', file)

@@ -20,12 +20,18 @@ def seed_pose(name="自然站姿", status="READY"):
     return pose_id, asset_id, f"POSE-{asset_id}"
 
 
+def shot_section():
+    return "\n## 机位&景别\n" + "".join(
+        "{{#runtime.is_shot_" + str(i) + "}}镜头" + str(i) + "范围要求\n{{/runtime.is_shot_" + str(i) + "}}"
+        for i in range(1, 6))
+
+
 def prepare_task():
     ids = insert_ready_generation_task_with_preview(status="STYLING_READY")
     background = insert_media_asset("shared-background.jpg")
     with get_db() as db:
         db.execute("INSERT INTO shoot_environment_references (media_asset_id, created_at, updated_at) VALUES (?, ?, ?)", (background, now_iso(), now_iso()))
-        db.execute("UPDATE prompt_configs SET content = '镜头{{runtime.shot_index}} {{runtime.shot_styling}}' WHERE key LIKE 'assembly.final_image_%'")
+        db.execute("UPDATE prompt_configs SET content = ? WHERE key LIKE 'assembly.final_image_%'", ("镜头{{runtime.shot_index}} {{runtime.shot_styling}}" + shot_section(),))
         db.execute("UPDATE generation_tasks SET pose_workflow_enabled = 1 WHERE id = ?", (ids["task_id"],))
         db.execute("UPDATE prompt_configs SET content = ? WHERE key = 'assembly.pose_selection'",
             ("{{runtime.pose_phase}}\n{{runtime.pose_candidates}}\n{{runtime.pose_image_manifest}}\n{{runtime.pose_shots}}",))
@@ -92,13 +98,19 @@ def test_pose_upload_and_read_do_not_call_ai(client, monkeypatch):
 
 
 @pytest.mark.parametrize("status", ["DRAFT", "READY"])
-def test_pose_recognition_is_explicit_and_saves_name_and_tags(client, monkeypatch, status):
+@pytest.mark.parametrize("concise", [False, True])
+def test_pose_recognition_is_explicit_and_saves_name_and_tags(client, monkeypatch, status, concise):
     monkeypatch.setattr(app_main.settings, "gemini_provider", "toapis")
     monkeypatch.setattr(app_main.settings, "gemini_toapis_model", "deepseek-v4.1-flash")
     pose_id, _, code = seed_pose(name="原始文件名", status=status)
     prepare_task()
     monkeypatch.setattr(app_main, "gemini_vision_input", lambda *_: {"image": "pose"})
     raw = {"name": "  正面插兜站姿  ", "tags": {"姿势描述": "正对镜头，左手插兜", "核心动作": ["左手插兜"], "扩展标签": ["按原样保留"]}}
+    if concise:
+        raw["tags"] = {"画面布局": "单人单视图", "视图组合": "正面", "参考景别": "半身",
+                       "姿势描述": "正面插兜，表现松弛。", "身体姿态": "站立，躯干正对镜头",
+                       "头颈与肩": "头稍向右倾，下颚微收", "手臂与手": "左手插兜；右手在画外",
+                       "视线": "看向镜头", "表情": "嘴唇闭合"}
     async def generate(*_args): return dumps(raw)
     monkeypatch.setattr(app_main, "generate_gemini_json_text", generate)
     response = client.post(f'/api/poses/{pose_id}/recognize')
@@ -349,7 +361,8 @@ def test_final_prompt_receives_selected_direction_without_legacy_pose_slots(clie
     with get_db() as db:
         db.execute("UPDATE shot_preset_slots SET pose_asset_id = NULL")
         db.execute(
-            "UPDATE prompt_configs SET content = '{{runtime.shot_styling}}{{runtime.shot_pose}}' WHERE key = 'assembly.final_image_top'"
+            "UPDATE prompt_configs SET content = ? WHERE key = 'assembly.final_image_top'",
+            ("{{runtime.shot_styling}}{{runtime.shot_pose}}" + shot_section(),)
         )
     mock_selection(monkeypatch, code, asset_id)
     run_selection(ids['task_id'])
@@ -677,6 +690,7 @@ def test_pose_direction_renders_action_facts_without_selection_meta() -> None:
             "展示优势": ["全面平整展示服装正面版型"],
             "适配加分规则": ["目标服装含侧插袋设计时加分"],
             "适配排除规则": ["服装完全无口袋时排除"],
+            "可调整动作": ["可改为双手垂落"],
             "存疑信息": ["小腿下段不可见"],
         },
         ensure_ascii=False,
@@ -688,6 +702,8 @@ def test_pose_direction_renders_action_facts_without_selection_meta() -> None:
     assert "核心动作：正面站立、单手插侧袋" in rendered
     assert "适配排除规则" not in rendered
     assert "展示优势" not in rendered
+    assert "可调整动作" not in rendered
+    assert "可改为双手垂落" not in rendered
     assert "存疑信息：小腿下段不可见" in rendered
     assert "面部可见性：侧脸可见" in rendered
     assert "表情神态：嘴唇微张" in rendered
@@ -816,7 +832,7 @@ def test_final_model_body_facts_use_frozen_input_not_current_profile(client, mon
     with get_db() as db:
         db.execute("UPDATE generation_task_input_versions SET model_snapshot_json = ? WHERE task_id = ?",
                    (dumps({'profile': {'height': '175cm', 'bodyShape': 'H型', 'waist': '59cm'}}), ids['task_id']))
-        db.execute("UPDATE prompt_configs SET content = '镜头{{runtime.shot_index}} {{runtime.model_body_facts}}' WHERE key LIKE 'assembly.final_image_%'")
+        db.execute("UPDATE prompt_configs SET content = ? WHERE key LIKE 'assembly.final_image_%'", ("镜头{{runtime.shot_index}} {{runtime.model_body_facts}}" + shot_section(),))
     mock_selection(monkeypatch, code, asset_id)
     run_selection(ids['task_id'])
     with get_db() as db:
@@ -829,3 +845,118 @@ def test_final_model_body_facts_use_frozen_input_not_current_profile(client, mon
     package = app_main.build_new_final_task_package(ids['task_id'], result_id)
     assert '175cm' in package['prompt'] and '59cm' in package['prompt']
     assert '999cm' not in package['prompt'] and '当前新模板' not in package['prompt']
+
+
+@pytest.mark.parametrize("layout,views", [
+    ("单人单视图", "侧面"), ("同人多视图", "正面 + 背面"),
+    ("同人多视图", "正面 + 正面"), ("同人多视图", "正面 + 侧面 + 背面"),
+    ("多人同框", "正面 + 侧面"), ("多图拼接", "全身正面 + 局部"), ("无法判断", "无法判断"),
+])
+def test_manual_pose_layout_preserves_facts_without_provider(client, monkeypatch, layout, views):
+    pose_id, _, _ = seed_pose()
+    def forbidden(*args, **kwargs):
+        raise AssertionError("layout correction must not call AI")
+    monkeypatch.setattr(app_main, "generate_gemini_json_text", forbidden)
+    response = client.patch(f"/api/poses/{pose_id}", json={"frameLayout": layout, "viewComposition": views})
+    assert response.status_code == 200
+    item = response.json()["item"]
+    assert item["name"] == "自然站姿" and item["status"] == "READY"
+    assert item["aiTags"] == {"核心动作": ["一手自然下垂"], "画面布局": layout, "视图组合": views}
+    assert client.get('/api/poses', params={"q": layout}).json()["total"] == 1
+    renamed = client.patch(f"/api/poses/{pose_id}", json={"name": "新名称"}).json()["item"]
+    assert renamed["aiTags"] == item["aiTags"]
+    with get_db() as db:
+        assert db.execute("SELECT COUNT(*) FROM generation_attempts").fetchone()[0] == 0
+
+
+@pytest.mark.parametrize("status", ["DRAFT", "TAGGING_FAILED", "TAGGING_RUNNING"])
+def test_layout_correction_requires_current_ready_tags(client, status):
+    pose_id, _, _ = seed_pose(status=status)
+    assert client.patch(f"/api/poses/{pose_id}", json={"frameLayout": "单人单视图"}).status_code == 409
+
+
+@pytest.mark.parametrize("payload", [{}, {"frameLayout": "正背双视图"}, {"viewComposition": "  "}, {"viewComposition": "侧" * 121}])
+def test_invalid_layout_correction_does_not_mutate(client, payload):
+    pose_id, _, _ = seed_pose()
+    before = app_main.get_pose(pose_id)
+    assert client.patch(f"/api/poses/{pose_id}", json=payload).status_code in {400, 422}
+    assert app_main.get_pose(pose_id) == before
+
+
+def test_layout_facts_flow_to_candidates_and_frozen_history(client, monkeypatch):
+    ids = prepare_task()
+    pose_id, asset_id, code = seed_pose()
+    client.patch(f"/api/poses/{pose_id}", json={"frameLayout": "单人单视图", "viewComposition": "正面"})
+    mock_selection(monkeypatch, code, asset_id)
+    runtime, _, _, _ = app_main.pose_selection_context(app_main.get_generation_task_row(ids["task_id"]), '')
+    card = next(c for c in json.loads(runtime["pose_candidates"]) if c["code"] == code)
+    assert card["ai_tags"]["画面布局"] == "单人单视图"
+    selection = run_selection(ids["task_id"])["item"]["poseSelection"]
+    assert selection["shots"][0]["aiTags"]["视图组合"] == "正面"
+    client.patch(f"/api/poses/{pose_id}", json={"frameLayout": "同人多视图", "viewComposition": "正面 + 背面"})
+    assert app_main.get_generation_task_by_id(ids["task_id"])["poseSelection"] == selection
+
+
+def test_layout_changed_during_selection_rejects_stale_result(monkeypatch):
+    ids = prepare_task()
+    pose_id, asset_id, code = seed_pose()
+    mock_selection(monkeypatch, code, asset_id, after_shortlist=lambda: app_main.update_pose(
+        pose_id, app_main.PoseUpdateRequest(frameLayout="同人多视图", viewComposition="正面 + 背面")))
+    task = run_selection(ids["task_id"])["item"]
+    assert task["status"] == "FAILED" and task["poseSelection"] is None
+    with get_db() as db:
+        assert "发生变化" in db.execute("SELECT error_message FROM generation_attempts WHERE owner_type = 'generation_pose_selection'").fetchone()[0]
+
+
+@pytest.mark.parametrize("migration_name,digest_name", [
+    ("migration_pose_frame_layout_prompts", "POSE_FRAME_LAYOUT_LEGACY_DIGESTS"),
+    ("migration_objective_pose_tags", "OBJECTIVE_POSE_LEGACY_DIGESTS"),
+    ("migration_reconstructable_pose_tags", "RECONSTRUCTABLE_POSE_LEGACY_DIGESTS"),
+])
+def test_layout_prompt_upgrade_preserves_custom_empty_and_history(monkeypatch, migration_name, digest_name):
+    import hashlib
+    from pathlib import Path
+    from app import db as db_module
+    old = "previous exact reference"
+    monkeypatch.setattr(db_module, digest_name, {
+        key: hashlib.sha256(old.encode()).hexdigest()
+        for key in ("pose_tagging", "pose_selection", "final_prompt_optimizer")})
+    pose_id, _, _ = seed_pose()
+    before = app_main.get_pose(pose_id)
+    with get_db() as db:
+        db.execute("UPDATE prompt_configs SET content = ? WHERE key = 'assembly.pose_tagging'", (old,))
+        db.execute("UPDATE prompt_configs SET content = 'custom' WHERE key = 'assembly.pose_selection'")
+        getattr(db_module, migration_name)(db)
+        getattr(db_module, migration_name)(db)
+        canonical = (Path(__file__).resolve().parents[1] / 'prompt_templates/pose_tagging.txt').read_text()
+        assert db.execute("SELECT content FROM prompt_configs WHERE key = 'assembly.pose_tagging'").fetchone()[0] == canonical
+        assert db.execute("SELECT content FROM prompt_configs WHERE key = 'assembly.pose_selection'").fetchone()[0] == 'custom'
+        assert db.execute("SELECT content FROM prompt_configs WHERE key = 'assembly.final_prompt_optimizer'").fetchone()[0] == ''
+    assert app_main.get_pose(pose_id) == before
+
+
+def test_multiview_direction_preserves_view_identity_without_reference_framing():
+    from app.prompt_render import render_pose_direction
+    rendered = render_pose_direction(dumps({"画面布局": "同人多视图", "参考景别": "全身", "视图说明": "左侧正面，右侧背面", "核心动作": ["左侧视图右手扶腰", "右侧视图双手垂落"]}))
+    assert "左侧正面，右侧背面" in rendered
+    assert "左侧视图右手扶腰" in rendered and "右侧视图双手垂落" in rendered
+    assert "画面布局" not in rendered and "参考景别" not in rendered
+
+
+def test_concise_pose_facts_survive_legacy_shortlist_and_rendering():
+    from app.prompt_render import render_pose_direction
+    facts = {"画面布局": "单人单视图", "视图组合": "侧面", "参考景别": "全身",
+             "姿势描述": "侧身站立，表现克制。", "身体姿态": "躯干侧对镜头",
+             "头颈与肩": "头向镜头转，下颚微收，右肩稍低", "手臂与手": "右上臂离开躯干，右肘向外弯曲，前臂斜向内上方，右掌贴右侧腰部，四指朝下；左肘弯曲，前臂位于胸前，手腕下屈，指尖轻触右前臂",
+             "腰髋": "骨盆向左侧移", "腿脚": "右腿位于身体前方，膝伸直，脚尖朝身体前方，脚掌与脚跟接地；左膝微屈，小腿后收并在右小腿后方交叉，左脚尖触地，左脚跟不可见",
+             "视线": "看向镜头", "表情": "嘴唇微张", "其他可见动作": "背部接触支撑面"}
+    library = [{"code": f"P{i}", "images": [{"asset": {"id": i}}], "aiTags": facts} for i in range(5)]
+    plan = pose_plan_from_shortlist({"shots": [
+        {"shotIndex": i + 1, "candidateCodes": [f"P{i}"], "reason": "适配"} for i in range(5)]}, library)
+    shots = validate_pose_plan(plan, {f"P{i}": {i} for i in range(5)})
+    rendered = render_pose_direction(shots[0]["direction"])
+    for key, value in facts.items():
+        if key not in {"画面布局", "视图组合", "参考景别"}:
+            assert value in rendered
+        else:
+            assert key not in rendered

@@ -222,6 +222,14 @@ LILY 使用 `/home/lilyroot/ruyi-releases/<发布标识>/` 保存发布包，用
 
 LILY 已在 `lilyroot` crontab 安排每周一 03:30（北京时间，服务器为 UTC）运行稳定路径 `/home/lilyroot/ruyi-maintenance/backup-production-data.sh`，日志写入 `/data/ruyi-dream/periodic-data-backups/backup.log`。脚本检查在途 AI attempt 和上传，存在时跳过并在日志注明，维护人员须补跑并确认新 `COMPLETE`。每周检查 `crontab -l`、日志、最新 `COMPLETE` 和数据盘空间；更换脚本时同步更新仓库与稳定路径。
 
+此次迁移 089 会自动清理历史调用记录中的重复配置与可还原的重复正文，保留实际请求响应、图片来源、生成结果及恢复状态。常规启动会完成逻辑瘦身；要同时回收 SQLite 文件空间，在停止 backend、完成上述发布备份并构建新镜像后，先执行新镜像中的离线升级脚本，再启动 backend：
+
+```bash
+docker compose run --rm --no-deps --entrypoint python backend scripts/upgrade_database.py /app/data/app.sqlite3
+```
+
+参数必须是容器内实际 APP_DATABASE_PATH；若部署使用其他路径，请替换。脚本额外生成同目录 `app.sqlite3.pre-upgrade-<时间>` 一致性备份（包含已提交 WAL），校验完整性与外键，运行迁移及 VACUUM，输出前后体积和瘦身统计。全程不启动应用工作协程、不调用 AI、不访问或删除对象存储；应预留原库备份和 VACUUM 临时文件空间。失败即停止发布，保留备份；验收后按现有发布备份政策人工处理备份。裸跑环境使用 `backend/.venv/bin/python backend/scripts/upgrade_database.py <实际数据库路径>`。不要对运行中的业务库执行离线脚本。
+
 数据库结构迁移由后端启动时自动完成，旧库可升新代码；不能假定新库可直接运行旧代码。应用故障优先修复后重发；需要整体回退时，停写并用同一发布备份恢复旧版本镜像、SQLite 数据目录和 `.env`。若新版本写入过对象或业务数据，先评估差异，避免用旧库覆盖新业务数据。
 
 ## 5. 备份与恢复
@@ -319,3 +327,5 @@ docker compose exec backend python scripts/repair_media_metadata.py --limit 50 -
 6. 按 Runbook 重做同一 5 分钟窗口。应用回滚保留 074 字段与触发器、保留旧详情 GET；媒体回滚仍保持占位和显式原图，不恢复静默原图兜底。
 
 QoS/AQM、CDN、multipart、公平队列均未作为本轮应用 P0 实施；需要生产数据和真实排队点控制权后再单独执行。
+
+迁移 090 随启动或上述离线升级脚本自动执行：姿势选搭改为仅引用成片 Prompt 的「机位&景别」章节；对缺失的下装镜头 2 补入已有图位规则，并兼容旧独立镜头章节标题。不会改写历史请求、生成结果或冻结配置。升级后可在 Prompt 维护刷新三类成片与姿势选搭的预览，检查自定义配置是否存在缺失/重复章节或未覆盖的镜头；该预览不调用模型。

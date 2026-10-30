@@ -432,7 +432,7 @@ def test_full_fourteen_reference_group_splits_optimizer_and_preserves_frozen_ret
     with get_db() as db:
         row = db.execute('SELECT * FROM generation_attempts WHERE id=?', (attempt,)).fetchone()
     assert len(loads(row['request_snapshot_json'])['batchRequests']) == 2
-    assert len(loads(row['response_snapshot_json'])['shots']) == 5
+    assert sum(len(loads(batch['raw_text'])['shots']) for batch in loads(row['response_snapshot_json'])['batchResponses']) == 5
     response = client.post(f'/api/generation-result-images-new/{image_ids[0]}/retry')
     assert response.status_code == 200
     active = response.json()['item']['resultSet']['images'][0]['activeAttemptId']

@@ -5787,3 +5787,12 @@ label:has(> input[type="file"]:disabled) { cursor: not-allowed; opacity: .5; }
 .record-shot-actions, .record-group-actions { display: flex; flex-wrap: wrap; gap: 6px; }
 .record-group-actions { margin-top: 12px; }
 .record-shot small { color: var(--text-muted, #64748b); }
+
+/* Specificity must exceed the shared confirmation dialog width. */
+.confirm-modal.ai-log-modal { width: min(1120px, 96vw); min-width: 0; }
+.model-call-batches { display: grid; gap: 14px; min-width: 0; }
+.model-call-batch { padding: 12px; border: 1px solid #dbe5ee; border-radius: 8px; min-width: 0; }
+.model-call-batches summary, .ai-log-process-facts > summary { cursor: pointer; padding: 8px 0; }
+.model-call-batches .prompt-comparison-text { max-height: 460px; overflow: auto; white-space: pre-wrap; overflow-wrap: anywhere; }
+.ai-log-process-facts { margin-top: 14px; }
+@media (max-width: 720px) { .ai-log-json-grid { grid-template-columns: 1fr; } }

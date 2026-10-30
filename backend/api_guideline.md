@@ -259,3 +259,15 @@ user 的 generation 系列 JSON 响应不含 poseSelection 参考图、姿势要
 迁移 085 建立 `collection_revisions` 和 SQLite 触发器：相关业务表新增、修改、删除时，在同一事务递增对应计数；仅更新时间/lease 心跳或字段无变化不递增。媒体派生可用性等字段变化使相关视图重新读取。计数持久化，多进程共享，事务回滚也回滚计数；客户端取得版本后才读取列表，读取成功后记住版本，以免漏掉并发写入或失败重试。
 
 前端空闲每 30–36 秒检查；有运行条目时按 5–18 秒自适应检查。只有版本变化才读取当前分页/详情，页面离开、标签页隐藏或离线时停止后台请求。首次版本检查会建立基线并读取一次列表，之后无变化只返回版本号。更新前后端需配套部署，后端启动执行迁移后提供此接口。
+
+### 姿势画面标签补录
+
+`PATCH /api/poses/{id}`（admin）接受可选 `name`、`frameLayout`、`viewComposition`，至少提供一项。布局只允许单人单视图、同人多视图、多人同框、多图拼接、无法判断；视图组合为 1–120 字非空文本，按画面顺序记录朝向并保留重复项。补录仅允许 READY 且未归档、未识别中的条目，合并到 `aiTags.画面布局` / `aiTags.视图组合`，保留其余标签；不调用 AI、不更新历史选择。仅修改名称保留原兼容行为。
+
+### Prompt 渲染与调用批次
+
+`POST /api/prompt-configs/{key}/preview` 继续只做本地渲染。优化系统规则或优化用户消息选择历史调用后，新增 `modelBatches`：每项包含 `batchIndex`、`shotIds`、`systemInstruction`、渲染后的 `prompt` 和按附件顺序排列的 `images`。预览使用历史镜头和媒体描述，不读取图片字节、不请求 provider。优化 system 按保存原文显示，user 使用独立可维护模板。启用优化时成片模板是优化器的 sourcePrompt，最终生图正文以优化器返回为准。
+
+管理员调用详情新增同形 `modelBatches`，额外含 `output`、`hasResponse`，按 batchIndex 关联真实输入输出；未记录响应的批次明确留空。`modelInput` / `modelOutput` 对多批调用返回 batches，不再用首批输入搭配末批输出。`requestFacts` / `responseFacts` 是紧凑过程记录，调用方不能依赖重复的顶层 prompt、raw_text 或 shots。未分批的旧记录继续按原方式读取。新字段仍仅 admin 可访问。
+
+姿势选搭的 Prompt 预览使用与执行一致的章节渲染：`runtime.pose_shots` 只包含对应品类成片 Prompt 中五个镜头各自的「机位&景别」，历史上下文使用当时 runtime 事实并应用当前配置。预览诊断复用 `missingPlaceholders` 返回章节缺失、重复、镜头正文缺失等配置错误；实际选姿势在创建 attempt 和调用模型之前返回 409。选择历史记录不会改写 `historicalPrompt` 或历史快照。

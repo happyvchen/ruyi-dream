@@ -544,8 +544,8 @@ def build_fal_request_snapshot(task_package: dict[str, Any], image_urls: list[st
     settings = get_settings()
     generation = task_package.get("generation", {}) if isinstance(task_package.get("generation"), dict) else {}
     stage = generation.get("stage")
-    prompt = str(task_package.get("prompt") or "").strip()
-    if not prompt:
+    prompt = str(task_package.get("prompt") or "")
+    if not prompt.strip():
         raise RuntimeError("图片生成缺少 Prompt 维护渲染出的 prompt。")
     return {
         "prompt": prompt,
@@ -562,8 +562,8 @@ def build_toapis_request_snapshot(task_package: dict[str, Any], image_urls: list
     settings = get_settings()
     generation = task_package.get("generation", {}) if isinstance(task_package.get("generation"), dict) else {}
     stage = generation.get("stage")
-    prompt = str(task_package.get("prompt") or "").strip()
-    if not prompt:
+    prompt = str(task_package.get("prompt") or "")
+    if not prompt.strip():
         raise RuntimeError("图片生成缺少 Prompt 维护渲染出的 prompt。")
     if len(image_urls) > TOAPIS_MAX_REFERENCE_IMAGES:
         raise RuntimeError(f"参考图最多支持 {TOAPIS_MAX_REFERENCE_IMAGES} 张")

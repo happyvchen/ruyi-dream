@@ -145,3 +145,19 @@ media/<media-uuid>/_derived/final-cells/original-shot<1..6>.png
 ## 已发布版本兼容
 
 `app/generation_records.py` 负责从真实调用证据补齐已发布版本、逐镜头重放输入与旧参考图传输适配。数据库迁移只投影事实，不调用模型或对象存储；main 的发布事务同时更新 attempt、当前图片和版本。`scripts/audit_upgrade.py` 独立于应用配置与生命周期，提供升级前后只读盘点和清理预检。
+
+## 可维护请求与紧凑过程事实（迁移 089）
+
+模型指令只来自 Prompt 配置。`assembly.tagging_request`、`assembly.styling_request` 通过显式 `{{assembly.*}}` 引用原挑图／打标／选搭正文；渲染器处理占位符、条件和模板引用，不再在调用代码里拼接正文。原配置继续独立维护，新增请求模板展示完整发送结构。格式纠错、单张调整和旧参考板编号映射分别由 `assembly.contract_correction`、`assembly.image_retry`、`assembly.reference_transport` 托管。迁移一次性把旧代码中的结构和原有指令转入这些槽位，已有自定义正文不覆盖，运行时缺配置仍报错，不提供内置 fallback。
+
+成片优化的 system 是 `assembly.final_prompt_optimizer` 原文；user 由 `assembly.final_prompt_optimizer_input` 渲染，变量仅含镜头完整正文、图号映射和附件角色。存储键、资产 ID、URL、文件名和裁切记录留在过程事实，不进入新调用的 user 文本。图片附件仍按原顺序、去重、裁切和分批规则传入；优化正文直接用于生图，provider 不再隐式 trim 正文。
+
+`app/call_facts.py` 对新写入及历史记录应用相同的保守瘦身：可执行镜头包不再复制配置集合和原始模板；结果集仅冻结所选模板及显式依赖，供未完成的渲染继续使用。优化批次只记录一份请求和原始响应，不再额外复制第一批 prompt、最后一批 raw_text 和可完全还原的解析结果。sourcePackages 的正文仅在与批次 sourcePrompt 完全相等时省略，读取历史测试上下文时按批次事实还原。图片来源、运行变量、未知字段、不同或无法解析的原始响应、provider 恢复状态和已发布版本保留。姿势选搭 audit 中的整库配置副本移除，实际姿势选择 plan 中供后续执行的冻结规则保留。
+
+迁移 089 自动处理 attempts、已发布版本、镜头执行记录和结果集准备记录，不操作对象存储或调用 AI。`scripts/upgrade_database.py` 在停写维护窗口执行 SQLite 一致性备份、现有迁移、完整性检查和 VACUUM，释放已腾空页面；备份不自动删除。直接启动应用同样自动执行逻辑迁移，但不在在线启动中执行 VACUUM。
+
+## 姿势选搭章节引用（迁移 090）
+
+`runtime.pose_shots` 使用 `render_pose_shot_requirements`，只读取对应品类成片配置中的「## 机位&景别」。先按当前镜头展开模板条件，再定位唯一标题及其正文（到同级或更高标题结束），然后解析正文占位符。五个镜头都必须有有效条件正文；只有公共引导语、章节缺失、重复或正文占位符缺失均在发起模型调用前失败。完整成片仍使用同一冻结配置，摄影正文不会复制到选姿势输入。
+
+Prompt 列表、保存结果和草稿预览都通过相同章节校验；姿势选搭预览按当前配置与样例/历史事实重建五条要求，历史实际发送独立展示、不回写。历史尝试没有旧运行时字段时，从原选搭及输入版本恢复事实。新调用仅在已有 runtime 中保留所需动态事实，不增设重复配置副本。

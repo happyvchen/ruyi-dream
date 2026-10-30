@@ -19,7 +19,7 @@ import threading
 import time
 import zipfile
 from uuid import uuid4
-from typing import Any
+from typing import Any, Literal
 from urllib.parse import quote, urlencode
 
 from fastapi import BackgroundTasks, Depends, FastAPI, File, Form, HTTPException, Query, Request, UploadFile
@@ -34,6 +34,7 @@ from .config import get_settings
 from .db import dumps, get_db, init_db, loads, log_event, now_iso
 from .generation_records import capture_published_image, published_versions, replay_package, executable_package, json_object, adapt_replay_references
 from .prompt_render import (
+    extract_prompt_section,
     render_image_reference_spans,
     upgrade_prompt_runtime_placeholders,
     render_pose_direction,
@@ -41,8 +42,9 @@ from .prompt_render import (
     render_user_instruction_line,
     render_user_requirement_line,
 )
+from .call_facts import compact_package, compact_request, compact_response, compact_preparation, optimizer_source_packages, model_batches, referenced_configs
 from .prompt_optimization import (
-    OPTIMIZER_KEY, optimizer_input, text_hash, parse_optimized_prompts,
+    OPTIMIZER_KEY, optimizer_input, optimizer_mapped_input, text_hash, parse_optimized_prompts,
     optimizer_reference_identity, optimizer_package_batches,
 )
 from .gemini_provider import (
@@ -587,7 +589,7 @@ def user_generation_response(value: Any) -> Any:
     private_keys = {
         "poseSelection", "poseSelectionId", "attempts", "requestFacts", "responseFacts",
         "technicalMessage", "provider", "providerRequestId", "candidateRetrievalSnapshot",
-        "model_raw_output", "promptConfigSnapshot",
+        "model_raw_output", "promptConfigSnapshot", "modelBatches", "modelInput", "modelOutput",
     }
     result = {}
     for key, item in value.items():
@@ -5415,7 +5417,7 @@ async def regenerate_result_group(result_set_id: int, user_instruction: str | No
             capture_published_image(db, old['id'])
             ids.append(int(db.execute("""INSERT INTO generation_result_images_new
                 (result_set_id,shot_role,sort_order,status,execution_snapshot_json,user_instruction_json,created_at,updated_at)
-                VALUES (?,?,?,'QUEUED',?,?,?,?)""", (new_id, old['shot_role'], old['sort_order'], dumps(package),
+                VALUES (?,?,?,'QUEUED',?,?,?,?)""", (new_id, old['shot_role'], old['sort_order'], dumps(compact_package(package)),
                 dumps(package.get('finalImageUserInstruction', {})), timestamp, timestamp)).lastrowid))
         supersede_generation_result_sets(db, group['task_id'], timestamp, keep_result_set_id=new_id)
         activate_result_context(db, new_id)
@@ -5531,7 +5533,7 @@ async def run_generate_final_images(
             raise HTTPException(409, "冻结的背景或姿势图片不可用，请重新选择姿势")
         family_label = {"top": "上装", "bottom": "下装", "one_piece": "套装"}[category_family]
         raise HTTPException(status_code=409, detail=f"{family_label}拍摄预设尚未完整，请联系管理员补齐该类型的 5 个镜头图片")
-    preparation = freeze_final_prompt_configuration()
+    preparation = freeze_final_prompt_configuration(category_family)
     selection_plan = loads(selection["plan_json"], {}) if selection else {}
     if selection_plan.get("workflow") == "shared_background_v1":
         preparation["configRows"].update(selection_plan["promptConfigSnapshot"])
@@ -5645,7 +5647,7 @@ def continue_active_final_result_set(
             if existing:
                 package = replay_package(db, existing)
                 if package:
-                    db.execute('UPDATE generation_result_images_new SET execution_snapshot_json=? WHERE id=?', (dumps(package), existing['id']))
+                    db.execute('UPDATE generation_result_images_new SET execution_snapshot_json=? WHERE id=?', (dumps(compact_package(package)), existing['id']))
                 elif published_versions(db, existing):
                     raise HTTPException(409, '该镜头的拍摄输入记录不完整，请使用重新一键成片；原图仍可查看和下载')
                 attempt = db.execute(
@@ -5708,7 +5710,7 @@ def continue_active_final_result_set(
     return image_ids
 
 
-def freeze_final_prompt_configuration() -> dict[str, Any]:
+def freeze_final_prompt_configuration(category_family: str) -> dict[str, Any]:
     rows = get_prompt_config_rows()
     optimizer = rows.get(OPTIMIZER_KEY)
     enabled = bool(optimizer and row_value(optimizer, "enabled", 0))
@@ -5717,8 +5719,7 @@ def freeze_final_prompt_configuration() -> dict[str, Any]:
     return {
         "mode": "optimized" if enabled else "direct", "status": "PENDING" if enabled else "DIRECT",
         "referenceCanvas": SQUARE_WHITE_CANVAS,
-        "configRows": {key: {"content": row["content"], "group_type": row["group_type"]}
-                       for key, row in rows.items() if key.startswith("segment.") or key.startswith("assembly.final_")},
+        "configRows": referenced_configs(rows, [FINAL_IMAGE_PROMPT_CONFIG_KEYS[category_family], OPTIMIZER_KEY, "assembly.final_prompt_optimizer_input"]),
         "packages": {},
     }
 
@@ -5732,7 +5733,7 @@ def read_final_preparation(result_set_id: int) -> dict[str, Any]:
 def save_final_preparation(result_set_id: int, preparation: dict[str, Any]) -> None:
     with get_db() as db:
         db.execute("UPDATE generation_result_sets SET prompt_preparation_json = ?, updated_at = ? WHERE id = ?",
-                   (dumps(preparation), now_iso(), result_set_id))
+                   (dumps(compact_preparation(preparation)), now_iso(), result_set_id))
 
 
 def final_preparation_cancelled(task_id: int, result_set_id: int) -> bool:
@@ -5754,18 +5755,31 @@ def vision_reference_input(item: dict[str, Any]) -> dict[str, Any]:
 
 def optimizer_visual_inputs(packages: dict[str, Any], inputs: dict[str, Any]) -> list[dict[str, Any]]:
     """Keep each final prompt's local numbering while deduplicating vision attachments."""
-    images, manifest, seen = [], [], {}
-    for shot in inputs["shots"]:
-        for reference, item in zip(shot["references"], packages[shot["shotId"]]["imageInputs"]):
-            sources = item.get("collageItems") or [item]
+    inputs.update(optimizer_mapped_input(packages))
+    return [vision_reference_input(item) for item in optimizer_attachments(packages)]
+
+
+def optimizer_attachments(packages: dict[str, Any]) -> list[dict[str, Any]]:
+    seen, images = set(), []
+    for package in packages.values():
+        for item in package["imageInputs"]:
             identity = optimizer_reference_identity(item)
             if identity not in seen:
-                images.append(vision_reference_input(item))
-                seen[identity] = len(images)
-                manifest.append({"visionImageIndex": len(images), "role": item["role"], "sources": sources})
-            reference["visionImageIndex"] = seen[identity]
-    inputs["imageManifest"] = manifest
+                images.append(item)
+                seen.add(identity)
     return images
+
+
+def render_optimizer_user_message(inputs: dict[str, Any], rows: dict[str, Any] | None = None,
+                                  content: str | None = None) -> str:
+    key = "assembly.final_prompt_optimizer_input"
+    rendered, diagnostics = render_prompt_config(key, {
+        "optimizer_shots": dumps(inputs["shots"]),
+        "optimizer_image_manifest": dumps(inputs.get("imageManifest", [])),
+    }, rows=rows, content_overrides={key: content} if content is not None else None)
+    if diagnostics["missingPlaceholders"] or not rendered.strip():
+        raise ValueError("请配置成片提示词优化用户消息及其占位符")
+    return rendered
 
 
 async def prepare_final_prompts(task_id: int, result_set_id: int, image_ids: list[int]) -> bool:
@@ -5804,7 +5818,7 @@ async def prepare_final_prompts(task_id: int, result_set_id: int, image_ids: lis
     try:
         pending = {key: build_new_final_task_package(task_id, int(key)) for key in pending}
         system_prompt = preparation["configRows"][OPTIMIZER_KEY]["content"]
-        request_snapshot = {"promptConfigKey": OPTIMIZER_KEY, "promptContentHash": text_hash(system_prompt),
+        request_snapshot = {"promptConfigKey": OPTIMIZER_KEY, "promptConfigKeys": [OPTIMIZER_KEY, "assembly.final_prompt_optimizer_input"], "promptContentHash": text_hash(system_prompt),
                             "systemInstruction": system_prompt, "sourcePackages": pending,
                             **gemini_request_meta(),
                             "invocation": {"mode": "final_prompt_optimization", "providerCallStarted": False}}
@@ -5823,9 +5837,8 @@ async def prepare_final_prompts(task_id: int, result_set_id: int, image_ids: lis
             if final_preparation_cancelled(task_id, result_set_id) or generation_task_or_attempt_cancelled(task_id, attempt_id):
                 cancelled = True
                 break
-            batch_prompt = dumps(inputs)
-            request_snapshot.setdefault("prompt", batch_prompt)
-            request_snapshot["batchRequests"].append({"batchIndex": batch_index, "shotIds": list(batch), "prompt": batch_prompt})
+            batch_prompt = render_optimizer_user_message(inputs, preparation["configRows"])
+            request_snapshot["batchRequests"].append({"batchIndex": batch_index, "shotIds": list(batch), "prompt": batch_prompt, "images": optimizer_attachments(batch)})
             request_snapshot["invocation"]["providerCallStarted"] = True
             update_attempt_request_snapshot(attempt_id, request_snapshot)
             provider_call_started = True
@@ -6013,13 +6026,15 @@ def shot_replay_package(task_id: int, image_id: int, version_id: int | None = No
     if package is None:
         package = build_new_final_task_package(task_id, image_id)
     # JSON copy also detaches nested input lists from cached preparation packages.
-    package = loads(dumps(package), {})
+    package = loads(dumps(compact_package(package)), {})
     if user_instruction is not None:
         if len(user_instruction) > MAX_USER_INPUT_CHARS:
             raise HTTPException(400, f"成片要求最多 {MAX_USER_INPUT_CHARS} 字")
         base = package.get('replayBasePrompt', package['prompt'])
         package['replayBasePrompt'] = base
-        package['prompt'] = base + ("\n\n本次单张调整要求（更新原补充要求）：" + user_instruction if user_instruction else "")
+        package['prompt'] = render_prompt_template("assembly.image_retry", {
+            "original_prompt": base, "final_image_user_instruction": user_instruction,
+        }) if user_instruction else base
         package['finalImageUserInstruction'] = build_stage_user_instruction_context('final_image', user_instruction)
         package['renderedPromptHash'] = text_hash(package['prompt'])
     return package
@@ -6050,7 +6065,7 @@ async def retry_new_result_image(image_id: int, request: Request, payload: Resul
         db.execute('UPDATE generation_attempts SET retry_of_attempt_id=? WHERE id=?', (row['active_attempt_id'], attempt_id))
         db.execute("""UPDATE generation_result_images_new SET status='QUEUED', active_attempt_id=?,
             execution_snapshot_json=?, user_instruction_json=?, locked_by=NULL, locked_until=NULL, updated_at=? WHERE id=?""",
-            (attempt_id, dumps(package), dumps(package.get('finalImageUserInstruction', {})), now_iso(), image_id))
+            (attempt_id, dumps(compact_package(package)), dumps(package.get('finalImageUserInstruction', {})), now_iso(), image_id))
         activate_result_context(db, row['result_set_id'])
         db.execute("UPDATE generation_result_sets SET status='RUNNING', updated_at=? WHERE id=?", (now_iso(), row['result_set_id']))
         db.execute("UPDATE generation_tasks SET status='FINAL_RUNNING', updated_at=? WHERE id=?", (now_iso(), row['task_id']))
@@ -6922,7 +6937,7 @@ def preview_prompt_config(config_key: str, request: Request) -> dict[str, Any]:
     key = normalize_prompt_config_key(config_key)
     if key not in get_prompt_config_rows():
         raise HTTPException(status_code=404, detail="Prompt 配置不存在")
-    rendered, diagnostics = render_prompt_config(key, sample_prompt_runtime())
+    rendered, diagnostics = render_prompt_preview(key, sample_prompt_runtime())
     return {"rendered": rendered, "diagnostics": diagnostics}
 
 
@@ -6934,25 +6949,51 @@ def preview_prompt_config_draft(config_key: str, payload: PromptConfigPreviewReq
         raise HTTPException(status_code=404, detail="Prompt 配置不存在")
     runtime = sample_prompt_runtime()
     historical_prompt = None
+    batches = []
+    optimizer_keys = {OPTIMIZER_KEY, "assembly.final_prompt_optimizer_input"}
     if payload.attemptId:
         with get_db() as db:
-            attempt = db.execute("SELECT request_snapshot_json FROM generation_attempts WHERE id = ?", (payload.attemptId,)).fetchone()
+            attempt = db.execute("SELECT * FROM generation_attempts WHERE id = ?", (payload.attemptId,)).fetchone()
         if not attempt:
             raise HTTPException(status_code=404, detail="调用记录不存在")
         facts = loads(attempt["request_snapshot_json"], {})
         prompt_keys = facts.get("promptConfigKeys") if isinstance(facts.get("promptConfigKeys"), list) else []
-        optimizer_history = key == OPTIMIZER_KEY and facts.get("promptRuntime") and facts.get("generation", {}).get("stage") == "final_image"
+        optimizer_history = key in optimizer_keys and (
+            facts.get("promptConfigKey") == OPTIMIZER_KEY or
+            (facts.get("promptRuntime") and facts.get("generation", {}).get("stage") == "final_image"))
         if facts.get("promptConfigKey") != key and key not in prompt_keys and not optimizer_history:
             raise HTTPException(status_code=400, detail="调用记录与 Prompt 配置不匹配")
         if isinstance(facts.get("promptRuntime"), dict):
             runtime = facts["promptRuntime"]
+        elif key == "assembly.pose_selection" and isinstance(facts.get("runtime"), dict):
+            runtime = dict(facts["runtime"])
+            # Older attempts recorded the pose context but not final-template facts.
+            if "shot_styling" not in runtime:
+                with get_db() as db:
+                    styling = db.execute("SELECT * FROM generation_stylings WHERE id = ?", (facts.get("stylingId"),)).fetchone()
+                if styling:
+                    runtime.update(pose_shot_runtime(loads(styling["styling_plan_json"], {}),
+                        get_input_version(styling["input_version_id"]) or {}, bool(loads(styling["selected_material_snapshot_json"], []))))
         historical_prompt = facts.get("systemInstruction") if key == OPTIMIZER_KEY else facts.get("prompt")
-    rendered, diagnostics = render_prompt_config(
-        key,
-        runtime,
-        content_overrides={key: payload.content[:120000]},
-    )
-    return {"rendered": rendered, "historicalPrompt": historical_prompt, "diagnostics": diagnostics}
+        if key in optimizer_keys:
+            packages = optimizer_source_packages(facts)
+            if not packages and facts.get("imageInputs"):
+                packages = {str(attempt["owner_id"]): {**facts, "prompt": facts.get("originalPrompt") or facts["prompt"]}}
+            try:
+                for index, batch in enumerate(optimizer_package_batches(packages, TOAPIS_MAX_MESSAGE_IMAGES), 1):
+                    inputs = optimizer_mapped_input(batch)
+                    batches.append({"batchIndex": index, "shotIds": list(batch),
+                        "systemInstruction": payload.content if key == OPTIMIZER_KEY else prompt_config_content(OPTIMIZER_KEY),
+                        "prompt": render_optimizer_user_message(inputs, content=payload.content if key != OPTIMIZER_KEY else None),
+                        "images": optimizer_attachments(batch)})
+            except (KeyError, TypeError, ValueError) as exc:
+                raise HTTPException(400, "该历史记录缺少可预览的镜头事实") from exc
+    rendered, diagnostics = render_prompt_preview(key, runtime, content_overrides={key: payload.content[:120000]})
+    if key == OPTIMIZER_KEY:
+        # System rules are sent literally, independently of the user template.
+        rendered = payload.content[:120000]
+    return {"rendered": rendered, "historicalPrompt": historical_prompt, "diagnostics": diagnostics, "modelBatches": batches}
+
 
 
 @app.get("/api/prompt-configs/{config_key}/invocations")
@@ -6966,7 +7007,7 @@ def list_prompt_config_invocations(config_key: str, request: Request) -> dict[st
             OR EXISTS (SELECT 1 FROM json_each(request_snapshot_json, '$.promptConfigKeys') WHERE value = ?)
             OR (? AND owner_type = 'generation_result_image' AND request_snapshot_json LIKE '%promptRuntime%')
             ORDER BY created_at DESC, id DESC LIMIT 30""",
-            (key, key, key == OPTIMIZER_KEY),
+            (OPTIMIZER_KEY if key == "assembly.final_prompt_optimizer_input" else key, key, key in {OPTIMIZER_KEY, "assembly.final_prompt_optimizer_input"}),
         ).fetchall()
     return {"items": [{"id": row["id"], "ownerType": row["owner_type"], "provider": row["provider"], "status": row["status"], "createdAt": row["created_at"]} for row in rows]}
 
@@ -7014,7 +7055,7 @@ async def test_prompt_optimization(config_key: str, payload: PromptOptimizationT
             packages = {str(attempt["owner_id"]): source}
         elif attempt["owner_type"] == "generation_result_set":
             result_set_id = attempt["owner_id"]
-            packages = facts.get("sourcePackages", {})
+            packages = optimizer_source_packages(facts)
         else:
             raise HTTPException(400, "请选择成片调用记录")
     if not result_set_id or not packages or any(not item.get("promptRuntime") for item in packages.values()):
@@ -7030,8 +7071,7 @@ async def test_prompt_optimization(config_key: str, payload: PromptOptimizationT
             if diagnostics["missingPlaceholders"]:
                 raise HTTPException(400, "草稿缺少必要占位符")
             package["prompt"] = rendered
-    inputs = optimizer_input(packages)
-    snapshot = {"promptConfigKey": OPTIMIZER_KEY, "systemInstruction": system_prompt, "prompt": dumps(inputs),
+    snapshot = {"promptConfigKey": OPTIMIZER_KEY, "systemInstruction": system_prompt,
                 "promptContentHash": text_hash(system_prompt), "sourcePackages": packages,
                 **gemini_request_meta(), "invocation": {"mode": "optimization_test", "sourceAttemptId": payload.attemptId}}
     attempt_id = create_attempt("generation_result_set", result_set_id, effective_text_provider(), request_snapshot=snapshot)
@@ -7043,10 +7083,8 @@ async def test_prompt_optimization(config_key: str, payload: PromptOptimizationT
         for batch_index, batch in enumerate(optimizer_package_batches(packages, TOAPIS_MAX_MESSAGE_IMAGES), 1):
             inputs = optimizer_input(batch)
             images = optimizer_visual_inputs(batch, inputs)
-            batch_prompt = dumps(inputs)
-            if batch_index == 1:
-                snapshot["prompt"] = batch_prompt
-            snapshot["batchRequests"].append({"batchIndex": batch_index, "shotIds": list(batch), "prompt": batch_prompt})
+            batch_prompt = render_optimizer_user_message(inputs)
+            snapshot["batchRequests"].append({"batchIndex": batch_index, "shotIds": list(batch), "prompt": batch_prompt, "images": optimizer_attachments(batch)})
             update_attempt_request_snapshot(attempt_id, snapshot)
             raw_text = await generate_gemini_json_text(batch_prompt, images=images, system_instruction=system_prompt)
             batch_responses.append({"batchIndex": batch_index, "shotIds": list(batch), "raw_text": raw_text})
@@ -8671,13 +8709,9 @@ def schedule_styling_garment_tag_retry(
 def build_gemini_contract_correction_prompt(prompt: str, error: str) -> str:
     """在不改变业务 Prompt 的前提下追加协议纠错事实。"""
     reason = re.sub(r"\s+", " ", str(error)).strip()[:500]
-    return (
-        f"{prompt.rstrip()}\n\n"
-        "【上一次返回的协议纠错】\n"
-        f"上一次返回未通过系统契约校验：{reason}\n"
-        "请重新检查全部必需顶层字段及字段类型，只输出符合当前 Prompt 约定的严格 JSON；"
-        "不要输出 Markdown、解释文字或额外包裹。\n"
-    )
+    return render_prompt_template("assembly.contract_correction", {
+        "original_prompt": prompt.rstrip(), "contract_error": reason,
+    })
 
 
 def build_prompt_tagging_request_snapshot(garment: dict[str, Any], prompt: str) -> dict[str, Any]:
@@ -8687,7 +8721,7 @@ def build_prompt_tagging_request_snapshot(garment: dict[str, Any], prompt: str) 
         **gemini_request_meta(),
         "prompt": prompt,
         "promptConfigKey": "assembly.ai_tagging",
-        "promptConfigKeys": [GARMENT_IMAGE_SELECTION_PROMPT_CONFIG_KEY, "assembly.ai_tagging"],
+        "promptConfigKeys": ["assembly.tagging_request", GARMENT_IMAGE_SELECTION_PROMPT_CONFIG_KEY, "assembly.ai_tagging"],
         "promptRuntime": prompt_runtime,
         "renderedPromptHash": hashlib.sha256(prompt.encode("utf-8")).hexdigest(),
         "images": [
@@ -8711,9 +8745,7 @@ def build_prompt_tagging_request_snapshot(garment: dict[str, Any], prompt: str) 
 
 def build_prompt_tagging_prompt(garment: dict[str, Any] | None = None) -> str:
     runtime = prompt_tagging_runtime(garment or {})
-    selection_prompt = render_prompt_template(GARMENT_IMAGE_SELECTION_PROMPT_CONFIG_KEY, runtime)
-    tagging_prompt = render_prompt_template("assembly.ai_tagging", runtime)
-    return f"{selection_prompt.rstrip()}\n\n{tagging_prompt.rstrip()}\n"
+    return render_prompt_template("assembly.tagging_request", runtime)
 
 
 def prompt_tagging_runtime(garment: dict[str, Any]) -> dict[str, str]:
@@ -9633,7 +9665,7 @@ def create_attempt(owner_type: str, owner_id: int, provider: str, request_snapsh
           (owner_type, owner_id, provider, status, started_at, request_snapshot_json, created_at, updated_at)
         VALUES (?, ?, ?, 'RUNNING', ?, ?, ?, ?)
         """,
-        (owner_type, owner_id, provider, timestamp, dumps(request_snapshot or {}), timestamp, timestamp),
+        (owner_type, owner_id, provider, timestamp, dumps(compact_request(request_snapshot or {})), timestamp, timestamp),
     )
     return int(cursor.lastrowid)
 
@@ -9642,7 +9674,7 @@ def update_attempt_request_snapshot(attempt_id: int, request_snapshot: dict[str,
     with get_db() as db:
         db.execute(
             "UPDATE generation_attempts SET request_snapshot_json = ?, updated_at = ? WHERE id = ?",
-            (dumps(request_snapshot), now_iso(), attempt_id),
+            (dumps(compact_request(request_snapshot)), now_iso(), attempt_id),
         )
 
 
@@ -9696,7 +9728,7 @@ def finish_attempt(
                 timestamp if status == "SUCCEEDED" else None,
                 timestamp if status == "FAILED" else None,
                 timestamp if status == "CANCELLED" else None,
-                dumps(response_snapshot) if response_snapshot is not None else None,
+                dumps(compact_response(response_snapshot)) if response_snapshot is not None else None,
                 output_asset_id,
                 status,
                 error_code,
@@ -10037,14 +10069,12 @@ def attach_ai_stylist_prompt_snapshot(request_snapshot: dict[str, Any], candidat
         "ai_styling_user_instruction": render_user_instruction_line(request_snapshot.get("ai_styling_user_instruction") or {}),
         "user_requirement": render_user_requirement_line(request_snapshot.get("user_requirement") or {}),
     }
-    selection_prompt = render_prompt_template(HERO_IMAGE_SELECTION_PROMPT_CONFIG_KEY, prompt_runtime)
-    styling_prompt = render_prompt_template(AI_STYLING_PROMPT_CONFIG_KEY, prompt_runtime)
-    prompt = f"{selection_prompt.rstrip()}\n\n{styling_prompt.rstrip()}\n"
+    prompt = render_prompt_template("assembly.styling_request", prompt_runtime)
     return {
         **request_snapshot,
         "prompt": prompt,
         "promptConfigKey": AI_STYLING_PROMPT_CONFIG_KEY,
-        "promptConfigKeys": [HERO_IMAGE_SELECTION_PROMPT_CONFIG_KEY, AI_STYLING_PROMPT_CONFIG_KEY],
+        "promptConfigKeys": ["assembly.styling_request", HERO_IMAGE_SELECTION_PROMPT_CONFIG_KEY, AI_STYLING_PROMPT_CONFIG_KEY],
         "promptRuntime": prompt_runtime,
         "renderedPromptHash": hashlib.sha256(prompt.encode("utf-8")).hexdigest(),
     }
@@ -11266,8 +11296,7 @@ def build_new_final_task_package(task_id: int, result_image_id: int) -> dict[str
         "prompt": prompt,
         "categoryFamily": storyboard_category_family(styling_plan),
         "promptConfigKey": prompt_config_key, "promptContentHash": text_hash(config_content),
-        "promptConfigContent": config_content, "promptRuntime": prompt_runtime, "renderedPromptHash": text_hash(prompt),
-        "promptConfigSnapshot": frozen_rows,
+        "promptRuntime": prompt_runtime, "renderedPromptHash": text_hash(prompt),
         "imageInputs": image_inputs,
         "shotPresetVersionId": row["shot_preset_version_id"],
         "shotPresetSnapshotId": int(preset["id"]),
@@ -11695,8 +11724,10 @@ def get_prompt_config_rows() -> dict[str, Any]:
 
 
 def serialize_prompt_config_row(row: Any, rows: dict[str, Any]) -> dict[str, Any]:
-    rendered, diagnostics = render_prompt_config(str(row["key"]), sample_prompt_runtime(), rows=rows)
+    rendered, diagnostics = render_prompt_preview(str(row["key"]), sample_prompt_runtime(), rows=rows)
     content = str(row["content"] or "")
+    if str(row["key"]) == OPTIMIZER_KEY:
+        rendered = content
     return {
         "key": str(row["key"]),
         "groupType": str(row["group_type"] or "assembly"),
@@ -11744,6 +11775,7 @@ def render_prompt_config(
     runtime: dict[str, Any] | None = None,
     rows: dict[str, Any] | None = None,
     content_overrides: dict[str, str] | None = None,
+    section: str | None = None,
 ) -> tuple[str, dict[str, Any]]:
     diagnostics: dict[str, Any] = {
         "usedSegments": [],
@@ -11764,14 +11796,14 @@ def render_prompt_config(
 
     def resolve_placeholder(name: str, stack: list[str]) -> str:
         diagnostics["referencedPlaceholders"].append(name)
-        if name.startswith("segment."):
+        if name.startswith(("segment.", "assembly.")):
             if name in stack:
                 diagnostics["missingPlaceholders"].append(f"{name} (循环引用)")
                 return f"[[循环引用:{name}]]"
             if name not in rows:
                 diagnostics["missingPlaceholders"].append(name)
                 return f"[[缺失分段:{name}]]"
-            if name in rows and str(rows[name]["group_type"] or "") != "segment":
+            if name in rows and str(rows[name]["group_type"] or "") not in {"segment", "assembly"}:
                 diagnostics["missingPlaceholders"].append(name)
                 return f"[[缺失分段:{name}]]"
             if name not in diagnostics["usedSegments"]:
@@ -11779,7 +11811,7 @@ def render_prompt_config(
             segment_content = content_for(name) or ""
             if not segment_content.strip():
                 diagnostics["missingPlaceholders"].append(f"{name} (空内容)")
-            return render_text(segment_content, [*stack, name])
+            return render_text(segment_content, [*stack, name]).strip()
         if name.startswith("runtime."):
             runtime_name = name.removeprefix("runtime.")
             value = runtime.get(runtime_name)
@@ -11794,7 +11826,7 @@ def render_prompt_config(
 
     def placeholder_truthy(name: str) -> bool:
         # 条件段真值判定：不写诊断（缺失/空不是错误，只表示"不显示这段"）。
-        if name.startswith("segment."):
+        if name.startswith(("segment.", "assembly.")):
             return bool((content_for(name) or "").strip())
         if name.startswith("runtime."):
             value = runtime.get(name.removeprefix("runtime."))
@@ -11827,6 +11859,12 @@ def render_prompt_config(
         source = ""
     elif not source.strip():
         diagnostics["missingPlaceholders"].append(f"{key} (空内容)")
+    if section:
+        try:
+            source = extract_prompt_section(render_conditionals(source), section)
+        except ValueError as exc:
+            diagnostics["missingPlaceholders"].append(f"{key}: {exc}")
+            source = ""
     rendered = re.sub(r"\n{3,}", "\n\n", render_text(source, [key])).strip() + "\n"
     for field in ("usedSegments", "missingPlaceholders", "referencedPlaceholders"):
         diagnostics[field] = sorted(set(diagnostics[field]))
@@ -11855,6 +11893,10 @@ def sample_prompt_runtime() -> dict[str, Any]:
     # 结构化业务输入（选搭/标签）保持 JSON；面向模型的文本占位给出「已渲染」的样例文本，
     # 与运行时各 render_* 函数产物同形，便于「Prompt 维护」页预览真实效果。
     return {
+        "optimizer_shots": dumps([{"shotId": "example", "shotIndex": "1", "sourcePrompt": "样例镜头正文", "references": []}]),
+        "optimizer_image_manifest": "[]", "original_prompt": "原始请求正文",
+        "contract_error": "缺少必需字段", "independent_count": "13", "reference_count": "14",
+        "reference_mapping": "原图 14 对应参考图 14 的第 1 格",
         "pose_context": dumps({"code": "POSE-A", "images": [{"imageId": 101, "order": 1}]}),
         "pose_phase": "shortlist", "pose_candidates": "[]", "pose_shortlist": "[]",
         "pose_user_instruction": "动作自然，避免遮挡主推款细节。",
@@ -11898,10 +11940,19 @@ def sample_prompt_runtime() -> dict[str, Any]:
 
 def available_prompt_placeholders() -> list[dict[str, str]]:
     return [
+        *[{"name": key, "scope": "template", "description": "显式引用可维护模板"} for key in (
+            "assembly.garment_image_selection", "assembly.ai_tagging", "assembly.hero_image_selection", "assembly.ai_styling")],
+        *[{"name": f"runtime.{name}", "scope": "runtime", "description": label} for name, label in (
+            ("optimizer_shots", "本批镜头完整正文及局部图号映射（JSON）"),
+            ("optimizer_image_manifest", "本批图片附件编号及角色（JSON，无存储元数据）"),
+            ("original_prompt", "原始实际请求正文"), ("contract_error", "上一次返回的格式校验错误"),
+            ("independent_count", "独立参考图数量"), ("reference_count", "合并后的参考图数量"),
+            ("reference_mapping", "历史参考图与来源参考板格子映射"),
+        )],
         *[{"name": f"runtime.{name}", "scope": "runtime", "description": label} for name, label in (
             ("pose_context", "姿势识别条目与图片清单"), ("pose_phase", "姿势选搭阶段（固定 shortlist，初筛即定选）"),
             ("pose_candidates", "可选姿势标签和图片标识"), ("pose_shortlist", "旧配置兼容占位，固定为空列表"),
-            ("pose_user_instruction", "本次姿势要求"), ("pose_shots", "从冻结成片 Prompt 渲染的五镜头要求"),
+            ("pose_user_instruction", "本次姿势要求"), ("pose_shots", "仅引用对应品类成片 Prompt 的「机位&景别」章节，按五镜头分别展开；不含其他成片正文"),
             ("pose_image_manifest", "初筛实际传入的商品和背景图片顺序与角色"), ("shot_pose", "当前镜头冻结的姿势动作说明"),
             ("model_body_facts", "当前输入版本冻结的模特身高、体型及围度；缺失时为空"),
         )],
@@ -13302,6 +13353,10 @@ def get_generation_result_set(result_set_id: int | None) -> dict[str, Any] | Non
 def actual_model_input_from_snapshot(snapshot: dict[str, Any]) -> dict[str, Any]:
     if not isinstance(snapshot, dict):
         return {}
+    if snapshot.get("batchRequests"):
+        return {"systemInstruction": snapshot.get("systemInstruction", ""), "batches": [
+            {key: batch[key] for key in ("batchIndex", "shotIds", "prompt", "images") if key in batch}
+            for batch in snapshot["batchRequests"]]}
     result: dict[str, Any] = {}
     if snapshot.get("systemInstruction"):
         result["systemInstruction"] = snapshot["systemInstruction"]
@@ -13335,6 +13390,8 @@ def actual_model_input_from_snapshot(snapshot: dict[str, Any]) -> dict[str, Any]
 def actual_model_output_from_snapshot(snapshot: dict[str, Any]) -> dict[str, Any]:
     if not isinstance(snapshot, dict):
         return {}
+    if snapshot.get("batchResponses"):
+        return {"batches": snapshot["batchResponses"]}
     if "raw_json" in snapshot or "raw_text" in snapshot:
         return {
             key: snapshot[key]
@@ -13383,6 +13440,7 @@ def serialize_attempt_detail(row: Any) -> dict[str, Any]:
         "technicalMessage": row["error_message"],
         "error": error,
         "requestFacts": request_snapshot,
+        "modelBatches": model_batches(request_snapshot, response_snapshot),
         "responseFacts": response_snapshot,
         "modelInput": actual_model_input_from_snapshot(request_snapshot),
         "modelOutput": actual_model_output_from_snapshot(response_snapshot),
@@ -13794,7 +13852,9 @@ def model_asset_dir_is_referenced(asset_dir: str) -> bool:
 
 # Pose library: assets remain independent of photography masters and generation history.
 class PoseUpdateRequest(BaseModel):
-    name: str = Field(min_length=1, max_length=80)
+    name: str | None = Field(default=None, min_length=1, max_length=80)
+    frameLayout: Literal["单人单视图", "同人多视图", "多人同框", "多图拼接", "无法判断"] | None = None
+    viewComposition: str | None = Field(default=None, min_length=1, max_length=120)
 
 
 class PoseManageRequest(BaseModel):
@@ -13962,13 +14022,27 @@ def get_pose(pose_id: int) -> dict[str, Any]:
 
 @app.patch("/api/poses/{pose_id}", dependencies=[Depends(require_admin)])
 def update_pose(pose_id: int, payload: PoseUpdateRequest) -> dict[str, Any]:
-    name = payload.name.strip()
-    if not name:
+    name = payload.name.strip() if payload.name is not None else None
+    if name == "":
         raise HTTPException(400, "姿势名称不能为空")
+    if payload.viewComposition is not None and not payload.viewComposition.strip():
+        raise HTTPException(400, "视图组合不能为空")
+    if name is None and payload.frameLayout is None and payload.viewComposition is None:
+        raise HTTPException(400, "请提供姿势名称或画面布局")
     with get_db() as db:
         db.execute("BEGIN IMMEDIATE")
-        ensure_pose_editable(pose_row(db, pose_id))
-        db.execute("UPDATE poses SET name = ?, updated_at = ? WHERE id = ?", (name, now_iso(), pose_id))
+        row = pose_row(db, pose_id)
+        ensure_pose_editable(row)
+        tags = loads(row["ai_tags_json"], {})
+        if payload.frameLayout is not None or payload.viewComposition is not None:
+            if row["status"] != "READY":
+                raise HTTPException(409, "请先完成当前图片的姿势识别，再补录画面布局")
+            if payload.frameLayout is not None:
+                tags = {**tags, "画面布局": payload.frameLayout}
+            if payload.viewComposition is not None:
+                tags = {**tags, "视图组合": payload.viewComposition.strip()}
+        db.execute("UPDATE poses SET name = ?, ai_tags_json = ?, updated_at = ? WHERE id = ?",
+                   (name if name is not None else row["name"], dumps(tags) if payload.frameLayout is not None or payload.viewComposition is not None else row["ai_tags_json"], now_iso(), pose_id))
     return get_pose(pose_id)
 
 
@@ -14069,6 +14143,56 @@ async def run_pose_recognition(pose_id: int, attempt_id: int, pose: dict[str, An
             db.execute("UPDATE poses SET status = 'TAGGING_FAILED', tag_error_code = ?, updated_at = ? WHERE id = ? AND tag_attempt_id = ? AND status = 'TAGGING_RUNNING'", (error_code, now_iso(), pose_id, attempt_id))
 
 
+def pose_shot_runtime(plan: dict[str, Any], input_version: dict[str, Any], has_styling: bool) -> dict[str, Any]:
+    runtime = build_final_prompt_runtime(1, final_image_slot_roles(plan)[0], plan, [], {}, input_version.get("userRequirement", {}))
+    runtime["model_body_facts"] = render_model_body_facts(input_version.get("modelSnapshot", {}))
+    runtime.update(ref_shot_background="统一背景参考图", ref_shot_pose="当前镜头待选姿势图",
+                   ref_model_identity="数字模特身份参考图", ref_hero_garment="主推款参考图",
+                   ref_styling_garment="搭配款参考图" if has_styling else "")
+    return runtime
+
+
+def render_pose_shot_requirements(runtime: dict[str, Any], rows: dict[str, Any],
+                                 content_overrides: dict[str, str] | None = None) -> list[dict[str, Any]]:
+    family = runtime.get("category_family")
+    if family not in FINAL_IMAGE_PROMPT_CONFIG_KEYS:
+        raise HTTPException(409, "姿势选搭缺少有效的品类族")
+    key = FINAL_IMAGE_PROMPT_CONFIG_KEYS[family]
+    inactive = {**runtime, **{f"is_shot_{i}": "" for i in range(1, 6)}}
+    requirements = []
+    for index in range(1, 6):
+        current = {**inactive, "shot_index": str(index), f"is_shot_{index}": "1"}
+        text, diagnostics = render_prompt_config(key, current, rows=rows,
+            content_overrides=content_overrides, section="机位&景别")
+        if diagnostics["missingPlaceholders"]:
+            raise HTTPException(409, f"镜头 {index} 机位&景别配置错误：" + "；".join(diagnostics["missingPlaceholders"]))
+        # Common introductory prose must not disguise a missing/empty shot block.
+        baseline, _ = render_prompt_config(key, {**inactive, "shot_index": str(index)}, rows=rows,
+            content_overrides=content_overrides, section="机位&景别")
+        if not text.strip() or text == baseline:
+            raise HTTPException(409, f"{key} 的「机位&景别」缺少镜头 {index} 的有效条件正文，请补齐 runtime.is_shot_{index}")
+        requirements.append({"shotIndex": index, "shotRole": f"{family}_shot_{index}", "requirements": text})
+    return requirements
+
+
+def render_prompt_preview(key: str, runtime: dict[str, Any], rows: dict[str, Any] | None = None,
+                          content_overrides: dict[str, str] | None = None) -> tuple[str, dict[str, Any]]:
+    rows = rows if rows is not None else get_prompt_config_rows()
+    runtime = dict(runtime)
+    errors = []
+    if key == "assembly.pose_selection" or key in FINAL_IMAGE_PROMPT_CONFIG_KEYS.values():
+        if key in FINAL_IMAGE_PROMPT_CONFIG_KEYS.values():
+            runtime["category_family"] = next(f for f, k in FINAL_IMAGE_PROMPT_CONFIG_KEYS.items() if k == key)
+        try:
+            runtime["pose_shots"] = dumps(render_pose_shot_requirements(runtime, rows, content_overrides))
+        except HTTPException as exc:
+            runtime["pose_shots"] = "[]"
+            errors.append(str(exc.detail))
+    text, diagnostics = render_prompt_config(key, runtime, rows=rows, content_overrides=content_overrides)
+    diagnostics["missingPlaceholders"] = sorted(set(diagnostics["missingPlaceholders"] + errors))
+    return text, diagnostics
+
+
 def pose_selection_context(task: Any, user_instruction: str) -> tuple[dict[str, Any], list[dict[str, Any]], list[Any], dict[str, Any]]:
     with get_db() as db:
         poses = db.execute("SELECT * FROM poses WHERE status = 'READY' AND archived_at IS NULL ORDER BY created_at DESC, id DESC").fetchall()
@@ -14146,21 +14270,10 @@ def claim_pose_selection(task_id: int, user_instruction: str | None, trigger: st
         raise HTTPException(400, f"姿势要求最多 {MAX_USER_INPUT_CHARS} 字")
     runtime, library, references, styling = pose_selection_context(task, instruction)
     config = {key: dict(row) for key, row in get_prompt_config_rows().items()}
-    # Render the same frozen per-shot rules that will be used for final images.
     plan = loads(styling["styling_plan_json"], {})
     input_version = get_input_version(styling["input_version_id"]) or {}
-    requirements = []
-    for index, role in enumerate(final_image_slot_roles(plan), 1):
-        shot_runtime = build_final_prompt_runtime(index, role, plan, [], {}, input_version.get("userRequirement", {}))
-        shot_runtime["model_body_facts"] = render_model_body_facts(input_version.get("modelSnapshot", {}))
-        shot_runtime.update(ref_shot_background="统一背景参考图", ref_shot_pose="当前镜头待选姿势图",
-                            ref_model_identity="数字模特身份参考图", ref_hero_garment="主推款参考图",
-                            ref_styling_garment="搭配款参考图" if loads(styling["selected_material_snapshot_json"], []) else "")
-        requirement, check = render_prompt_config(final_image_prompt_config_key(plan), shot_runtime, rows=config)
-        if check["missingPlaceholders"] or not requirement.strip():
-            raise HTTPException(409, "请先配置当前服装类型的成片 Prompt 与镜头要求")
-        requirements.append({"shotIndex": index, "shotRole": role, "requirements": requirement})
-    runtime["pose_shots"] = dumps(requirements)
+    runtime.update(pose_shot_runtime(plan, input_version, bool(loads(styling["selected_material_snapshot_json"], []))))
+    runtime["pose_shots"] = dumps(render_pose_shot_requirements(runtime, config))
     prompt, diagnostics = render_prompt_config("assembly.pose_selection", runtime, rows=config)
     if diagnostics["missingPlaceholders"]:
         raise HTTPException(409, "请联系管理员在 Prompt 维护中配置姿势选搭规则与品牌信息")
@@ -14257,8 +14370,7 @@ async def execute_pose_selection(task_id: int, attempt_id: int, runtime: dict[st
         plan = {**plan, "shots": shots, "selectionMode": "shortlist_only"}
         plan = {**plan, "workflow": "shared_background_v1",
                 "shotRequirements": loads(runtime["pose_shots"], []),
-                "promptConfigSnapshot": {key: value for key, value in config.items()
-                    if key.startswith("segment.") or key == final_image_prompt_config_key(loads(styling["styling_plan_json"], {}))}}
+                "promptConfigSnapshot": referenced_configs(config, [final_image_prompt_config_key(loads(styling["styling_plan_json"], {}))])}
         if generation_task_or_attempt_cancelled(task_id, attempt_id):
             return
         by_code = {p["code"]: p for p in library}
@@ -14273,7 +14385,7 @@ async def execute_pose_selection(task_id: int, attempt_id: int, runtime: dict[st
             for shot in shots:
                 pose = by_code[shot["poseCode"]]
                 row = pose_row(db, pose["id"])
-                if row["status"] != "READY" or row["archived_at"] or not db.execute("SELECT 1 FROM pose_images WHERE pose_id = ? AND media_asset_id = ?", (pose["id"], shot["imageId"])).fetchone():
+                if row["status"] != "READY" or row["archived_at"] or loads(row["ai_tags_json"], {}) != pose["aiTags"] or not db.execute("SELECT 1 FROM pose_images WHERE pose_id = ? AND media_asset_id = ?", (pose["id"], shot["imageId"])).fetchone():
                     raise ValueError("候选姿势在选搭期间发生变化，请重新选姿势")
             selection_id = int(db.execute("""INSERT INTO generation_pose_selections
                 (task_id, input_version_id, styling_id, category_family, plan_json, attempt_id, created_at)

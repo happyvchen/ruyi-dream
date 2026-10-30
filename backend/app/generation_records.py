@@ -22,7 +22,7 @@ def executable_package(value: dict[str, Any]) -> bool:
                 and isinstance(value.get("imageInputs"), list) and value["imageInputs"])
 
 
-def adapt_replay_references(package: dict[str, Any], max_reference_images: int = 14) -> dict[str, Any]:
+def adapt_replay_references(package: dict[str, Any], max_reference_images: int = 14, *, render_prompt: Any = None) -> dict[str, Any]:
     """Keep requests within the current provider budget without dropping sources.
 
     All but the last available slot stay independent. The remainder form a labelled board;
@@ -45,11 +45,16 @@ def adapt_replay_references(package: dict[str, Any], max_reference_images: int =
         'tileLabels': [f'Original image {item["originalIndex"]}' for item in mapping],
     }]
     result['originalReferencePrompt'] = result['prompt']
-    result['prompt'] += (f'\n\n【参考图编号映射】前 {independent_count} 张参考图编号不变。第 {max_reference_images} 张是来源参考板，'
-                         '按从左到右、从上到下排列。上文的图号保留原含义：' +
-                         '；'.join(f'原图 {item["originalIndex"]} 对应参考图 {max_reference_images} 的第 {item["tile"]} 格'
-                                  for item in mapping) +
-                         '。各格只承担原图规定的职责，成片仍为单张照片，不输出参考板或拼图。')
+    if render_prompt is None:
+        # Lazy import keeps database-only upgrade/backfill independent of the app.
+        from .main import render_prompt_template
+        render_prompt = render_prompt_template
+    result['prompt'] = render_prompt("assembly.reference_transport", {
+        "original_prompt": result['prompt'], "independent_count": str(independent_count),
+        "reference_count": str(max_reference_images),
+        "reference_mapping": '；'.join(f'原图 {item["originalIndex"]} 对应参考图 {max_reference_images} 的第 {item["tile"]} 格'
+                                      for item in mapping),
+    })
     return result
 
 

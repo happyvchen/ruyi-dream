@@ -1,0 +1,1 @@
+{"shots": {{runtime.optimizer_shots}}, "imageManifest": {{runtime.optimizer_image_manifest}}}

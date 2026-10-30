@@ -10,6 +10,24 @@ import json
 import re
 from typing import Any
 
+
+def extract_prompt_section(content: str, title: str) -> str:
+    """Read one explicit Markdown section after template conditionals expand.
+
+    Stop at the next heading of equal or higher level. Never infer a section
+    from prose, summarize it, or fall back to the complete prompt.
+    """
+    headings = list(re.finditer(r"^(#{1,6})[ \t]+(.+?)[ \t]*\r?$", content, re.M))
+    matches = [h for h in headings if h[2] == title]
+    if len(matches) != 1:
+        raise ValueError(f"章节「{title}」必须且只能出现一次（当前 {len(matches)} 处）")
+    heading = matches[0]
+    end = next((h.start() for h in headings if h.start() > heading.start() and len(h[1]) <= len(heading[1])), len(content))
+    body = content[heading.end():end].strip()
+    if not body:
+        raise ValueError(f"章节「{title}」正文为空")
+    return body
+
 __all__ = [
     "render_user_instruction_line",
     "render_user_requirement_line",
@@ -24,6 +42,16 @@ __all__ = [
 # 注入成片 Prompt 只会稀释商品与构图要求。
 POSE_DIRECTION_FACT_KEYS: tuple[str, ...] = (
     "姿势描述",
+    "视图说明",
+    "身体姿态",
+    "头颈与肩",
+    "手臂与手",
+    "腰髋",
+    "腿脚",
+    "视线",
+    "表情",
+    "其他可见动作",
+    # Historical snapshots keep their original action/visibility facts.
     "姿势类别",
     "身体朝向",
     "头部视线",
@@ -33,7 +61,6 @@ POSE_DIRECTION_FACT_KEYS: tuple[str, ...] = (
     "模特左手",
     "双腿与重心",
     "核心动作",
-    "可调整动作",
     "存疑信息",
 )
 
