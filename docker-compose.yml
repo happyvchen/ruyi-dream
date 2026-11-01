@@ -7,6 +7,8 @@ services:
         # 部署校验：GIT_COMMIT=$(git rev-parse --short HEAD) docker compose up -d --build
         GIT_COMMIT: ${GIT_COMMIT:-}
     restart: unless-stopped
+    # Give in-flight synchronous image calls time to finish during planned stops.
+    stop_grace_period: 15m
     environment:
       APP_ENV: ${APP_ENV:-development}
       APP_DATA_DIR: /app/data
@@ -61,6 +63,11 @@ services:
       AI_STYLIST_CONTRACT_RETRY_DELAY_SECONDS: ${AI_STYLIST_CONTRACT_RETRY_DELAY_SECONDS:-15}
       TAGGING_MAX_CONCURRENCY: ${TAGGING_MAX_CONCURRENCY:-3}
       GPT_IMAGE2_PROVIDER: ${GPT_IMAGE2_PROVIDER:-toapis}
+      APIYI_API_KEY: ${APIYI_API_KEY:-}
+      APIYI_BASE_URL: ${APIYI_BASE_URL:-}
+      APIYI_IMAGE_MODEL: ${APIYI_IMAGE_MODEL:-gpt-image-2.5-sunburst-2026-09-08}
+      APIYI_IMAGE_SIZE: ${APIYI_IMAGE_SIZE:-2880x2880}
+      APIYI_TIMEOUT_SECONDS: ${APIYI_TIMEOUT_SECONDS:-360}
       GPT_IMAGE2_MODEL_ID: ${GPT_IMAGE2_MODEL_ID:-gpt-image-2.5-sunburst}
       GPT_IMAGE2_API_BASE_URL: ${GPT_IMAGE2_API_BASE_URL:-https://fal.run/openai/gpt-image-2/edit}
       GPT_IMAGE2_QUEUE_URL: ${GPT_IMAGE2_QUEUE_URL:-https://queue.fal.run/openai/gpt-image-2/edit}

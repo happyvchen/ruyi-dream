@@ -24,6 +24,25 @@
 
 后端需要出站 HTTPS 访问 `toapis.cn`（中国大陆默认通道；`direct` 通道则需访问 `googleapis.com`）。
 
+### 可选 API易图片编辑
+
+在未纳入 git 的部署 `.env` 中配置，再重启后端：
+
+```env
+GPT_IMAGE2_PROVIDER=apiyi
+APIYI_API_KEY=<本机填写真实密钥>
+APIYI_BASE_URL=https://api.apiyi.com/v1
+APIYI_IMAGE_MODEL=gpt-image-2.5-sunburst-2026-09-08
+APIYI_IMAGE_SIZE=2880x2880
+APIYI_TIMEOUT_SECONDS=360
+```
+
+模型可切换为 `gpt-image-2.5-flare-2026-09-08` 或显式选择 `gpt-image-2.5-sunburst-vip`；官方转发生产禁止浮动别名，VIP 使用渠道模型名，质量固定 `max`。当前采用的 VIP 4K Detail 方图规格是 `2880x2880`，不是 `4096x4096`。密钥不得进入前端、源码或 git。仅更换图片通道，文本模型仍按 `GEMINI_PROVIDER` 配置。
+
+API易同步生成没有可查询的任务ID。请求断连仍可能计费，因此超时最低360秒；`max`/2K长尾可将 `APIYI_TIMEOUT_SECONDS` 提高为600或更长。本项目由后台线程执行生成、前端轮询业务状态，Nginx仅托管静态文件，未代理这条上游请求；Uvicorn没有单请求执行时限，Compose停机宽限已设15分钟。外部出站代理/网关若存在，读取与发送时限必须不低于所配置的超时；例如Nginx代理设 `proxy_read_timeout 600s; proxy_send_timeout 600s;`。这些外部设施不在仓库内，需要部署时核对。不能把生成worker部署到执行上限小于生成预算的Serverless实例。
+
+同步返回的base64先持久化为恢复事实，再交付到S3；仅保存失败时使用“重新回传”，不会再次消耗生成额度。超时、断连、5xx会停止自动重发并提示提交结果未知，需要根据调用记录里的 `httpRequestId` 向API易核查。响应 `usage` 保留在管理员调用记录中；按公开单价折算是估算费用，账户最终扣费以API易账单为准。
+
 ## 2. 首次部署
 
 ### 2.1 配置 .env

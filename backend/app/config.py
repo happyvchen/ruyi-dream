@@ -105,6 +105,11 @@ class Settings:
     # 打标并发闸门。provider 瞬时错误统一由 Gemini 通道重试，业务层不再叠加整条重试。
     tagging_max_concurrency = int(os.getenv("TAGGING_MAX_CONCURRENCY") or "3")
     image_provider = os.getenv("GPT_IMAGE2_PROVIDER", "toapis").lower()
+    apiyi_api_key = os.getenv("APIYI_API_KEY", "")
+    apiyi_base_url = os.getenv("APIYI_BASE_URL", "").rstrip("/")
+    apiyi_image_model = os.getenv("APIYI_IMAGE_MODEL", "gpt-image-2.5-sunburst-2026-09-08")
+    apiyi_image_size = os.getenv("APIYI_IMAGE_SIZE", "2880x2880")
+    apiyi_timeout_seconds = int(os.getenv("APIYI_TIMEOUT_SECONDS", "360"))
     gpt_image2_model_id = os.getenv("GPT_IMAGE2_MODEL_ID", "gpt-image-2.5-sunburst")
     gpt_image2_api_base_url = os.getenv("GPT_IMAGE2_API_BASE_URL", "https://fal.run/openai/gpt-image-2/edit")
     gpt_image2_queue_url = os.getenv("GPT_IMAGE2_QUEUE_URL", "https://queue.fal.run/openai/gpt-image-2/edit")
@@ -183,6 +188,14 @@ class Settings:
             raise RuntimeError("GENERATION_IMAGE_TIMEOUT_SECONDS must be greater than 0.")
         if self.toapis_image_submit_timeout_seconds <= 0:
             raise RuntimeError("TOAPIS_IMAGE_SUBMIT_TIMEOUT_SECONDS must be greater than 0.")
+        if self.apiyi_timeout_seconds < 360:
+            raise RuntimeError("APIYI_TIMEOUT_SECONDS must be at least 360.")
+        if self.image_provider == "apiyi" and self.app_env in {"prod", "production"}:
+            if self.apiyi_image_model not in {
+                "gpt-image-2.5-sunburst-2026-09-08", "gpt-image-2.5-flare-2026-09-08",
+                "gpt-image-2.5-sunburst-vip",
+            }:
+                raise RuntimeError("APIYI_IMAGE_MODEL must use a pinned GPT-Image 2.5 snapshot or gpt-image-2.5-sunburst-vip in production.")
         if self.generation_unknown_submission_retry_limit < 0:
             raise RuntimeError("GENERATION_UNKNOWN_SUBMISSION_RETRY_LIMIT must be greater than or equal to 0.")
         if self.generation_unknown_submission_retry_delay_seconds < 0:
@@ -312,6 +325,8 @@ class Settings:
         return hashlib.sha256(f"{seed}:ruyi-session".encode("utf-8")).hexdigest()
 
     def is_image_provider_configured(self) -> bool:
+        if self.image_provider == "apiyi":
+            return bool(self.apiyi_api_key and self.apiyi_base_url)
         if self.image_provider == "toapis":
             return bool(self.toapis_api_key)
         if self.image_provider == "fal":

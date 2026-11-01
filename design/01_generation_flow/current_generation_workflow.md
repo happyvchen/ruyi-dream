@@ -68,6 +68,12 @@ n: 1
 
 请求使用 `/v1/images/generations`；存在 `image_urls` 时进入多参考图编辑模式，不传 `mask_url`。Sunburst 普通版兼容现有小写 `2k`、`image_urls` 和异步任务查询协议，继续使用 URL 返回方式。参数依据：[ToAPIs Sunburst 文档](https://docs.toapis.cn/docs/cn/api-reference/images/gpt-image-2.5-sunburst/generation)。
 
+### 可选 API易通道
+
+`GPT_IMAGE2_PROVIDER=apiyi` 为独立的同步图片编辑 provider：`APIYI_IMAGE_MODEL` 默认锁定 `gpt-image-2.5-sunburst-2026-09-08`（官方转发生产接受 Sunburst/Flare 日期快照；另可显式选择 `gpt-image-2.5-sunburst-vip`），`APIYI_IMAGE_SIZE=2880x2880`（VIP 的 4K Detail 方图档），固定 `quality=max`、`n=1`。使用 `/v1/images/edits` multipart 的 `image[]`，不传 `response_format`、`input_fidelity`，参考图职责、顺序、五镜头并发和冻结版本均沿用现行工作流。
+
+该通道的传输副本独立压缩：单张大于1.5 MB时才以原格式、质量90、长边≤2048等比重编码（不放大小图）；整批超过6 MB时进一步等比缩小。压缩失败的图片回退原图，保留全部参考图并记录无法达标的情况。返回的纯 `b64_json` 在后端解码并保存到现有 S3 媒体，前端复用预览和下载。同步请求最低等待360秒，断连、超时或网关5xx后禁止自动补提；已收结果的保存失败只恢复交付，不重新生成。API易 `max` 和 ToAPIs `high` 分别按各通道协议传输，互不覆盖配置。
+
 ## 成像质量约束
 
 三个成片 Prompt 都必须使用**正向的摄影真实感要求 + 少量结构性负向约束**，而不是大段“反伪影”要求：

@@ -3,7 +3,7 @@ from __future__ import annotations
 import pytest
 
 from app import main as app_main
-from app.db import PROMPT_CONFIG_CATALOG, get_db, now_iso
+from app.db import PROMPT_CONFIG_CATALOG, dumps, get_db, now_iso
 from app.generation_progress import ERROR_AUTH_FAILED, ERROR_CONN_RESET, ERROR_DELIVERY_FAILED, ERROR_UPLOAD_FAILED
 from conftest import insert_generation_task, insert_ready_generation_task_with_preview
 
@@ -150,7 +150,8 @@ def test_continue_generation_keeps_succeeded_slots_and_requeues_only_failed_or_m
     ]
 
 
-def test_continue_delivery_failure_preserves_provider_attempt_for_redelivery(client) -> None:
+@pytest.mark.parametrize("provider", ["toapis", "apiyi"])
+def test_continue_delivery_failure_preserves_provider_attempt_for_redelivery(client, provider) -> None:
     ids = insert_ready_generation_task_with_preview(family="top")
     first = client.post(f"/api/generation-tasks/{ids['task_id']}/generate-final")
     item = first.json()["item"]
@@ -169,6 +170,11 @@ def test_continue_delivery_failure_preserves_provider_attempt_for_redelivery(cli
             (failed_image_id, ERROR_DELIVERY_FAILED, timestamp, timestamp, timestamp, timestamp),
         )
         attempt_id = int(cursor.lastrowid)
+        if provider == "apiyi":
+            db.execute("UPDATE generation_attempts SET provider_request_id = NULL, response_snapshot_json = ? WHERE id = ?", (
+                dumps({"provider": "apiyi", "status": "SUCCEEDED", "providerStatusResponse": {"data": [{"b64_json": "cGFpZA=="}]}}),
+                attempt_id,
+            ))
         db.execute("UPDATE generation_tasks SET status = 'FINAL_PARTIAL' WHERE id = ?", (ids["task_id"],))
         db.execute("UPDATE generation_result_sets SET status = 'PARTIAL' WHERE id = ?", (result_set_id,))
         db.execute(

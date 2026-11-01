@@ -3,6 +3,8 @@ from __future__ import annotations
 from io import BytesIO
 from zipfile import ZipFile
 
+import pytest
+
 from app import main as app_main
 from app.db import dumps, get_db, now_iso
 from conftest import insert_ready_generation_task_with_preview, insert_styling_garment
@@ -223,7 +225,8 @@ def test_styling_garment_export_validates_selection_and_formal_images(client, mo
     assert "读取搭配服装原图失败" in unreadable.json()["detail"]
 
 
-def test_redeliver_failed_image_reuses_provider_request_without_new_generation_submission(client) -> None:
+@pytest.mark.parametrize("provider", ["toapis", "apiyi"])
+def test_redeliver_failed_image_reuses_provider_request_without_new_generation_submission(client, provider) -> None:
     ids = insert_ready_generation_task_with_preview(family="top")
     _, image_ids = create_result_set(ids["task_id"], ids["styling_id"], ids["preview_id"], ["FAILED", "SUCCEEDED", "SUCCEEDED", "SUCCEEDED", "SUCCEEDED"])
     timestamp = now_iso()
@@ -247,6 +250,11 @@ def test_redeliver_failed_image_reuses_provider_request_without_new_generation_s
             "UPDATE generation_result_images_new SET active_attempt_id = ? WHERE id = ?",
             (int(attempt.lastrowid), image_ids[0]),
         )
+        if provider == "apiyi":
+            db.execute("UPDATE generation_attempts SET provider_request_id = NULL, response_snapshot_json = ? WHERE id = ?", (
+                dumps({"provider": "apiyi", "status": "SUCCEEDED", "providerStatusResponse": {"data": [{"b64_json": "cGFpZA=="}]}}),
+                int(attempt.lastrowid),
+            ))
 
     response = client.post(f"/api/generation-result-images-new/{image_ids[0]}/redeliver")
 
@@ -259,7 +267,8 @@ def test_redeliver_failed_image_reuses_provider_request_without_new_generation_s
             (image_ids[0],),
         ).fetchone()
         queued = db.execute("SELECT status, active_attempt_id FROM generation_result_images_new WHERE id = ?", (image_ids[0],)).fetchone()
-    assert latest["provider_request_id"] == "provider-task-1"
+    assert latest["provider_request_id"] == ("provider-task-1" if provider == "toapis" else None)
+    assert app_main.attempt_has_provider_request_id(latest["id"])
     assert latest["retry_of_attempt_id"] is not None
     assert loads_request(latest)["invocation"]["mode"] == "manual_redeliver"
     assert queued["status"] == "QUEUED"

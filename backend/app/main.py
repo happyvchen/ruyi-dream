@@ -5651,7 +5651,7 @@ def continue_active_final_result_set(
                 elif published_versions(db, existing):
                     raise HTTPException(409, '该镜头的拍摄输入记录不完整，请使用重新一键成片；原图仍可查看和下载')
                 attempt = db.execute(
-                    "SELECT error_code, provider_request_id FROM generation_attempts WHERE id = ?",
+                    "SELECT error_code, provider_request_id, response_snapshot_json FROM generation_attempts WHERE id = ?",
                     (row_value(existing, "active_attempt_id"),),
                 ).fetchone()
                 if automatic_retry and existing["status"] == "FAILED":
@@ -5659,7 +5659,7 @@ def continue_active_final_result_set(
                         continue
                 preserve_provider_attempt = bool(
                     attempt
-                    and attempt["provider_request_id"]
+                    and (attempt["provider_request_id"] or resumable_sync_image_response(loads(attempt["response_snapshot_json"], {})))
                     and (
                         attempt["error_code"] == ERROR_DELIVERY_FAILED
                         or is_status_check_retryable_error(attempt["error_code"])
@@ -5872,6 +5872,9 @@ async def prepare_final_prompts(task_id: int, result_set_id: int, image_ids: lis
         if not cancelled:
             with get_db() as db:
                 for image_id in image_ids:
+                    pending_attempt = db.execute("SELECT active_attempt_id FROM generation_result_images_new WHERE id = ?", (image_id,)).fetchone()
+                    if pending_attempt and attempt_has_provider_request_id(pending_attempt["active_attempt_id"]):
+                        continue
                     db.execute("""UPDATE generation_attempts SET status = 'FAILED', failed_at = ?, updated_at = ?,
                         error_code = 'PROMPT_PREPARATION_FAILED', error_message = '拍摄准备未完成，尚未提交图片生成'
                         WHERE id = (SELECT active_attempt_id FROM generation_result_images_new WHERE id = ?)
@@ -6118,7 +6121,7 @@ def queue_result_image_redelivery(image_id: int) -> tuple[int, int, int]:
             if row["active_attempt_id"]
             else None
         )
-    if not last_attempt or not last_attempt["provider_request_id"]:
+    if not last_attempt or not attempt_has_provider_request_id(last_attempt["id"]):
         raise HTTPException(status_code=409, detail="该成片没有可回传的 provider 任务，请使用重新生成")
     task_id = int(row["task_id"])
     result_set_id = int(row["result_set_id"])
@@ -9790,11 +9793,18 @@ def prepare_attempt_provider_resubmission(
 
 
 def attempt_has_provider_request_id(attempt_id: int | None) -> bool:
-    if not attempt_id:
+    # Legacy name: synchronous providers have a durable result instead of a task ID.
+    return get_attempt_provider_resume_snapshot(attempt_id) is not None
+
+
+def resumable_sync_image_response(snapshot: Any) -> bool:
+    if not isinstance(snapshot, dict) or snapshot.get("provider") != "apiyi" or snapshot.get("status") != "SUCCEEDED":
         return False
-    with get_db() as db:
-        row = db.execute("SELECT provider_request_id FROM generation_attempts WHERE id = ?", (attempt_id,)).fetchone()
-    return bool(row and row["provider_request_id"])
+    response = snapshot.get("providerStatusResponse")
+    data = response.get("data") if isinstance(response, dict) else None
+    return bool(snapshot.get("outputPath") or (
+        isinstance(data, list) and data and isinstance(data[0], dict) and data[0].get("b64_json")
+    ))
 
 
 def get_attempt_provider_resume_snapshot(attempt_id: int | None) -> dict[str, Any] | None:
@@ -9805,11 +9815,16 @@ def get_attempt_provider_resume_snapshot(attempt_id: int | None) -> dict[str, An
             "SELECT provider_request_id, response_snapshot_json FROM generation_attempts WHERE id = ?",
             (attempt_id,),
         ).fetchone()
-    if not row or not row["provider_request_id"]:
+    if not row:
         return None
     snapshot = loads(row["response_snapshot_json"], {})
     if not isinstance(snapshot, dict):
         snapshot = {}
+    if not row["provider_request_id"]:
+        # 同步 API易没有 task ID；已收到的图片必须只恢复交付，不能再次计费生成。
+        if resumable_sync_image_response(snapshot):
+            return snapshot
+        return None
     snapshot["providerRequestId"] = row["provider_request_id"]
     return snapshot
 
@@ -12519,10 +12534,10 @@ async def _generate_image_asset_unlocked(
     - 阶段进度（导入张数、排队、生成、回传重试次数）持久化在 attempt 上，
       前端轮询任务详情即可看到实时阶段和分段耗时。
     """
-    if not settings.is_image_provider_configured():
-        raise RuntimeError(image_provider_missing_message())
     progress = AttemptProgressRecorder(attempt_id)
     payload = get_attempt_provider_resume_snapshot(attempt_id)
+    if payload is None and not settings.is_image_provider_configured():
+        raise RuntimeError(image_provider_missing_message())
     image_input_total = len(task_package.get("imageInputs") or [])
     generation_retries = int(payload.get("generationRetries") or 0) if payload else 0
     unknown_submission_retries = int(payload.get("unknownSubmissionRetries") or 0) if payload else 0
@@ -12567,7 +12582,10 @@ async def _generate_image_asset_unlocked(
                 uploaded_inputs = unknown_snapshot.get("imageInputs")
                 if isinstance(uploaded_inputs, list) and uploaded_inputs:
                     submit_task_package = {**submit_task_package, "imageInputs": uploaded_inputs}
-                retry_allowed = unknown_submission_retries < settings.generation_unknown_submission_retry_limit
+                retry_allowed = (
+                    unknown_snapshot.get("provider") != "apiyi"
+                    and unknown_submission_retries < settings.generation_unknown_submission_retry_limit
+                )
                 snapshot = {
                     **unknown_snapshot,
                     "providerRequestHistory": provider_request_history,
@@ -12864,8 +12882,9 @@ def run_image_provider_check(provider_response: dict[str, Any], output_key: str)
 
 def run_image_provider_deliver(provider_response: dict[str, Any], output_key: str) -> dict[str, Any]:
     status_response = provider_response.get("providerStatusResponse")
+    provider = get_image_provider("apiyi") if provider_response.get("provider") == "apiyi" else get_image_provider()
     return asyncio.run(
-        get_image_provider().deliver(
+        provider.deliver(
             provider_refresh_row(provider_response, output_key),
             status_response if isinstance(status_response, dict) else {},
         )
@@ -12884,6 +12903,8 @@ def provider_refresh_row(provider_response: dict[str, Any], output_key: str) -> 
 
 
 def image_provider_missing_message() -> str:
+    if settings.image_provider == "apiyi":
+        return "Image-2 provider 未配置：当前使用 apiyi，请设置 APIYI_API_KEY 和 APIYI_BASE_URL。"
     if settings.image_provider == "toapis":
         return "Image-2 provider 未配置：当前使用 toapis，请设置 TOAPIS_API_KEY，或将 GPT_IMAGE2_PROVIDER=fal 并设置 FAL_KEY。"
     if settings.image_provider == "fal":

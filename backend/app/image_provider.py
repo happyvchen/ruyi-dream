@@ -1460,10 +1460,14 @@ def toapis_url(path: str) -> str:
     return f"{base}{path if path.startswith('/') else '/' + path}"
 
 
-def get_image_provider() -> ImageGenerationProvider:
+def get_image_provider(provider_name: str | None = None) -> ImageGenerationProvider:
     settings = get_settings()
-    if settings.image_provider == "toapis":
+    provider_name = provider_name or settings.image_provider
+    if provider_name == "apiyi":
+        from .apiyi_provider import GPTImage2ApiyiProvider
+        return GPTImage2ApiyiProvider()
+    if provider_name == "toapis":
         return GPTImage2ToapisProvider()
-    if settings.image_provider == "fal":
+    if provider_name == "fal":
         return GPTImage2FalProvider()
-    raise RuntimeError(f"不支持的 Image-2 provider：{settings.image_provider}。支持 toapis 或 fal。")
+    raise RuntimeError(f"不支持的 Image-2 provider：{provider_name}。支持 toapis、fal 或 apiyi。")

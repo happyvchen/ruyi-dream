@@ -64,6 +64,18 @@ AI 选搭的模型输出只含 `selected_files` 和最终方案业务字段，�
 - provider 成功后的下载失败只重试下载；本地对象存储、数据或代码错误标记为 `SYSTEM_ERROR`，不自动重试。
 - 提交未知、生成重试次数和 provider ID 历史均持久化在 attempt 快照中，自动恢复预算耗尽后才向用户呈现部分失败。
 
+## API易同步编辑通道
+
+`GPT_IMAGE2_PROVIDER=apiyi` 使用 `app/apiyi_provider.py`。从环境读取 `APIYI_API_KEY`、`APIYI_BASE_URL`，模型独立配置为 `APIYI_IMAGE_MODEL`（缺省 `gpt-image-2.5-sunburst-2026-09-08`，官方转发生产强制日期快照，可切换 Flare 同日期版本；另支持显式选择 `gpt-image-2.5-sunburst-vip`）。`APIYI_IMAGE_SIZE` 缺省 `2880x2880`（VIP 的 4K Detail 方图档），质量固定 `max`，`APIYI_TIMEOUT_SECONDS` 缺省且最低 360 秒。
+
+发送 `/images/edits` multipart，参考图按既有冻结顺序、裁切和宫格规则渲染后以 `image[]` 上传，接口限制 1–16 张（业务主流程仍最多14张）。单张超过1.5 MB才以原 PNG/JPEG/WebP 格式、质量90、长边不超过2048等比处理，不放大小图；PNG使用无损编码，质量参数不改变其无损性质。整批超过6 MB时继续等比缩小传输副本，包含单张未超阈值的图片；某张处理失败回退原图，不丢图、不终止其他图片。若原图回退使预算无法满足，继续发送并在日志和 manifest 明确记录超预算。不覆盖原始素材。不传 `response_format`、`input_fidelity`、ToAPIs 的 `resolution/image_urls/client_business_id`。
+
+API易没有异步 task ID。HTTP请求标识仅作为 `httpRequestId` 供查账，不用于状态查询。同步调用仍运行在现有后台 worker，浏览器轮询业务状态；断连、超时、5xx 或不完整成功响应标记 `SUBMISSION_UNKNOWN`，禁止自动查询或补提，避免重复计费。取消检查发生在发请求之前，在途请求仍等待结果保存。
+
+响应的 `b64_json` 先在 attempt 的 `providerStatusResponse` 保留一份以便崩溃/存储失败后仅恢复交付；解码并校验图片后写入现有 S3 媒体键，生成缩略图，交付成功后移除 base64，只保留 usage、请求标识等响应事实。恢复不要求 task ID，也不依赖当前 provider 配置或 API密钥。前端复用原图预览、单图下载和整组导出，密钥和 base64 不下发到普通用户界面。
+
+接口依据：[概览](https://docs.apiyi.com/api-capabilities/gpt-image-2/overview.md)、[图片编辑](https://docs.apiyi.com/api-capabilities/gpt-image-2/image-edit.md)。
+
 ## ToAPIs 错误契约
 
 ToAPIs 图片任务是异步协议：创建接口返回任务 ID，状态接口即使 HTTP 200 也可能以 `status=failed` 返回终态错误。后端必须同时解析 HTTP 错误信封和异步 `error.code/error.message`；当顶层 `generation_failed` 的 message 内嵌上游 JSON 时，继续提取最深层 `code/type/message/param`，不能把整个响应字典拼进普通用户文案。
