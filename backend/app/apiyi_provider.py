@@ -3,7 +3,6 @@ from __future__ import annotations
 
 import base64
 import hashlib
-import logging
 import math
 import time
 from io import BytesIO
@@ -16,67 +15,80 @@ from PIL import Image, ImageOps
 from . import image_provider as shared
 from .generation_progress import ERROR_DELIVERY_FAILED, GenerationPhaseError
 
-logger = logging.getLogger(__name__)
-SINGLE_IMAGE_BYTES = 1_500_000
-TOTAL_IMAGE_BYTES = 6_000_000
+# API易 recommends <=10 MB per image; this is not a documented hard maximum.
+# No documented aggregate byte limit: never shrink healthy inputs for a group budget.
+RECOMMENDED_IMAGE_BYTES = 10_000_000
+REFERENCE_QUALITIES = (95, 90, 85)
 
 
-def recompress_reference(content: bytes, max_edge: int = 2048) -> bytes:
-    """Preserve PNG/JPEG/WebP and alpha; quality 90 for lossy formats."""
+def _encode_reference(image: Image.Image, fmt: str, *, quality: int | None = None) -> bytes:
+    output = BytesIO()
+    metadata = {key: image.info[key] for key in ("icc_profile", "exif") if image.info.get(key)}
+    if fmt == "PNG":
+        image.save(output, fmt, optimize=True, **metadata)
+    else:
+        image.save(output, "WEBP", lossless=quality is None, quality=quality or 100,
+                   method=6, exact=True, **metadata)
+    return output.getvalue()
+
+
+def recompress_reference(content: bytes) -> tuple[bytes, dict[str, Any]]:
+    """Only oversized inputs: lossless -> bounded quality -> proportional resize.
+
+    Every candidate is encoded from decoded source pixels, never from a previous
+    lossy candidate. Original stored media is never modified.
+    """
     with Image.open(BytesIO(content)) as source:
-        fmt = source.format
-        if fmt not in {"PNG", "JPEG", "WEBP"}:
-            raise ValueError("API易参考图须为 PNG/JPEG/WebP")
+        if source.format not in {"PNG", "JPEG", "WEBP"} or getattr(source, "is_animated", False):
+            raise ValueError("API易参考图须为静态 PNG/JPEG/WebP")
         image = ImageOps.exif_transpose(source)
-        image.thumbnail((max_edge, max_edge), Image.Resampling.LANCZOS)
-        output = BytesIO()
-        image.save(output, fmt, quality=90, optimize=True)
-        return output.getvalue()
+        # WebP supports RGB/RGBA; retain transparency, including palette alpha.
+        mode = "RGBA" if "A" in image.getbands() or "transparency" in image.info else "RGB"
+        image = image.convert(mode)
+        facts = {"originalDimensions": list(source.size)}
+        for fmt in ("PNG", "WEBP"):
+            candidate = _encode_reference(image, fmt)
+            if len(candidate) <= RECOMMENDED_IMAGE_BYTES:
+                return candidate, {**facts, "uploadedDimensions": list(image.size),
+                                   "compressionMethod": "lossless"}
+        for quality in REFERENCE_QUALITIES:
+            candidate = _encode_reference(image, "WEBP", quality=quality)
+            if len(candidate) <= RECOMMENDED_IMAGE_BYTES:
+                return candidate, {**facts, "uploadedDimensions": list(image.size),
+                                   "compressionMethod": "quality", "encodingQuality": quality}
+        # No fixed edge cap. Reduce only this input and only as far as needed.
+        width, height = image.size
+        while (width, height) != (1, 1):
+            ratio = min(0.95, math.sqrt(RECOMMENDED_IMAGE_BYTES / len(candidate)) * 0.95)
+            width, height = max(1, int(width * ratio)), max(1, int(height * ratio))
+            resized = image.resize((width, height), Image.Resampling.LANCZOS)
+            candidate = _encode_reference(resized, "WEBP", quality=REFERENCE_QUALITIES[-1])
+            if len(candidate) <= RECOMMENDED_IMAGE_BYTES:
+                return candidate, {**facts, "uploadedDimensions": [width, height],
+                                   "compressionMethod": "resize", "encodingQuality": REFERENCE_QUALITIES[-1]}
+        raise ValueError("无法在单图建议体积内准备参考图")
 
 
 def compress_references(contents: list[bytes]) -> tuple[list[bytes], list[dict[str, Any]]]:
-    result = list(contents)
-    facts: list[dict[str, Any]] = [{"originalBytes": len(content)} for content in contents]
-    failed: set[int] = set()
+    result, facts = [], []
     for index, content in enumerate(contents):
-        if len(content) <= SINGLE_IMAGE_BYTES:
-            continue
+        fact: dict[str, Any] = {"originalBytes": len(content),
+                                "recommendedMaxBytes": RECOMMENDED_IMAGE_BYTES,
+                                "compressionMethod": "unchanged"}
         try:
-            result[index] = recompress_reference(content)
-        except Exception:
-            failed.add(index)
-            facts[index]["compressionFallback"] = True
-            logger.warning("API易 reference %s compression failed; retaining original", index + 1)
-
-    # The aggregate budget may require shrinking otherwise small individual images.
-    # Never drop/reorder a reference; failed images remain byte-identical originals.
-    edge = 2048
-    while sum(map(len, result)) > TOTAL_IMAGE_BYTES and edge > 32:
-        if sum(len(contents[index]) for index in failed) >= TOTAL_IMAGE_BYTES:
-            break  # Failed originals already exhaust the budget; do not damage healthy inputs.
-        edge = max(32, min(edge - 1, int(edge * math.sqrt(TOTAL_IMAGE_BYTES / sum(map(len, result))) * 0.9)))
-        changed = False
-        for index, content in enumerate(contents):
-            if index in failed:
-                continue
-            try:
-                candidate = recompress_reference(content, edge)
-                if len(candidate) < len(result[index]):
-                    result[index] = candidate
-                    changed = True
-            except Exception:
-                result[index] = content
-                failed.add(index)
-                facts[index]["compressionFallback"] = True
-                logger.warning("API易 reference %s compression failed; retaining original", index + 1)
-        if not changed and len(failed) == len(contents):
-            break
-    over_budget = sum(map(len, result)) > TOTAL_IMAGE_BYTES
-    if over_budget:
-        logger.warning("API易 references exceed 6 MB after compression fallback; continuing with all references")
-    for index, content in enumerate(result):
-        facts[index].update({"uploadedBytes": len(content), "sha256": hashlib.sha256(content).hexdigest(),
-                             "aggregateBudgetExceeded": over_budget})
+            if len(content) > RECOMMENDED_IMAGE_BYTES:
+                uploaded, processing = recompress_reference(content)
+                fact.update(processing)
+            else:
+                uploaded = content  # Preserve bytes, dimensions, encoding and metadata.
+                with Image.open(BytesIO(content)) as source:
+                    fact.update(originalDimensions=list(source.size), uploadedDimensions=list(source.size))
+        except Exception as exc:
+            # Stop before the paid POST; do not silently upload a broken preparation.
+            raise ValueError(f"API易第 {index + 1} 张参考图准备失败：{exc}") from exc
+        fact.update(uploadedBytes=len(uploaded), sha256=hashlib.sha256(uploaded).hexdigest())
+        result.append(uploaded)
+        facts.append(fact)
     return result, facts
 
 
@@ -123,7 +135,7 @@ class GPTImage2ApiyiProvider(shared.ImageGenerationProvider):
             if on_progress:
                 on_progress(index, len(inputs))
             shared.ensure_upload_deadline(deadline, item)
-            contents.append(shared.render_reference_input_bytes(item, deadline)[0])
+            contents.append(shared.render_reference_input_bytes(item, deadline, prefer_original=True)[0])
         contents, facts = compress_references(contents)
         files = []
         for index, content in enumerate(contents):
@@ -142,7 +154,7 @@ class GPTImage2ApiyiProvider(shared.ImageGenerationProvider):
         manifest = shared.build_provider_reference_image_manifest(inputs, [None] * len(inputs))
         for item, fact in zip(manifest, facts):
             item.update(fact)
-            item["providerInputPolicyVersion"] = "apiyi_multipart_v1"
+            item["providerInputPolicyVersion"] = "apiyi_multipart_v2"
         snapshot = {"provider": "apiyi", "model": request["model"], "submissionMode": "completed",
                     "providerRequestId": None, "providerUrls": {}, "imageInputs": inputs,
                     "providerRequest": request, "providerReferenceImageManifest": manifest}

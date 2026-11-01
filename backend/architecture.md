@@ -68,11 +68,15 @@ AI 选搭的模型输出只含 `selected_files` 和最终方案业务字段，�
 
 `GPT_IMAGE2_PROVIDER=apiyi` 使用 `app/apiyi_provider.py`。从环境读取 `APIYI_API_KEY`、`APIYI_BASE_URL`，模型独立配置为 `APIYI_IMAGE_MODEL`（缺省 `gpt-image-2.5-sunburst-2026-09-08`，官方转发生产强制日期快照，可切换 Flare 同日期版本；另支持显式选择 `gpt-image-2.5-sunburst-vip`）。`APIYI_IMAGE_SIZE` 缺省 `2880x2880`（VIP 的 4K Detail 方图档），质量固定 `max`，`APIYI_TIMEOUT_SECONDS` 缺省且最低 360 秒。
 
-发送 `/images/edits` multipart，参考图按既有冻结顺序、裁切和宫格规则渲染后以 `image[]` 上传，接口限制 1–16 张（业务主流程仍最多14张）。单张超过1.5 MB才以原 PNG/JPEG/WebP 格式、质量90、长边不超过2048等比处理，不放大小图；PNG使用无损编码，质量参数不改变其无损性质。整批超过6 MB时继续等比缩小传输副本，包含单张未超阈值的图片；某张处理失败回退原图，不丢图、不终止其他图片。若原图回退使预算无法满足，继续发送并在日志和 manifest 明确记录超预算。不覆盖原始素材。不传 `response_format`、`input_fidelity`、ToAPIs 的 `resolution/image_urls/client_business_id`。
+发送 `/images/edits` multipart，参考图按既有冻结顺序和几何规则渲染后以 `image[]` 上传，接口限制 1–16 张（业务主流程仍最多14张）。API易优先读取静态 PNG/JPEG/WebP 存储原图，绕过默认8000长边的标准化副本；其他导入格式仍使用标准化副本。传输策略 `apiyi_multipart_v2` 以官方“推荐单张 ≤10MB”为单图处理目标（保守按 10,000,000 字节计算，不宣称硬上限）：未超目标的渲染结果逐字节保留，无长边上限；超过目标的单张先尝试同尺寸 PNG/WebP 无损重编码，再尝试同尺寸 WebP 质量95、90、85，仍超目标时才从原始解码像素等比缩小、以质量85编码。保留透明通道和颜色配置，实际编码格式决定 multipart 后缀与 MIME。不设置整组字节预算，不因其他图片体积而缩小合格图片。处理失败在付费请求前报错，不静默回退或丢图。manifest 记录原始/上传字节数、尺寸、处理方式、编码质量（如适用）、SHA256 和策略版本。不覆盖原始素材、已有结果或历史 manifest。不传 `response_format`、`input_fidelity`、ToAPIs 的 `resolution/image_urls/client_business_id`。
+
+明确的体积拒绝（如 HTTP 413）保留上游错误并停止，不自动压缩重提；超时不能判定为体积超限。该策略取消旧版1.5MB单图、6MB整组和2048长边限制，不改动其他 provider 的传输策略。
 
 API易没有异步 task ID。HTTP请求标识仅作为 `httpRequestId` 供查账，不用于状态查询。同步调用仍运行在现有后台 worker，浏览器轮询业务状态；断连、超时、5xx 或不完整成功响应标记 `SUBMISSION_UNKNOWN`，禁止自动查询或补提，避免重复计费。取消检查发生在发请求之前，在途请求仍等待结果保存。
 
 响应的 `b64_json` 先在 attempt 的 `providerStatusResponse` 保留一份以便崩溃/存储失败后仅恢复交付；解码并校验图片后写入现有 S3 媒体键，生成缩略图，交付成功后移除 base64，只保留 usage、请求标识等响应事实。恢复不要求 task ID，也不依赖当前 provider 配置或 API密钥。前端复用原图预览、单图下载和整组导出，密钥和 base64 不下发到普通用户界面。
+
+参考图体积建议依据：[API易 VIP 图片编辑](https://docs.apiyi.com/api-capabilities/gpt-image-2-vip/image-edit)。该页未公布单图或整组的硬性字节上限。
 
 接口依据：[概览](https://docs.apiyi.com/api-capabilities/gpt-image-2/overview.md)、[图片编辑](https://docs.apiyi.com/api-capabilities/gpt-image-2/image-edit.md)。
 

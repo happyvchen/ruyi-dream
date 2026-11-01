@@ -907,12 +907,13 @@ def square_white_reference_bytes(content: bytes) -> bytes:
         return output.getvalue()
 
 
-def render_reference_input_bytes(item: dict[str, Any], deadline: float | None = None) -> tuple[bytes, str | None]:
+def render_reference_input_bytes(item: dict[str, Any], deadline: float | None = None,
+                                 *, prefer_original: bool = False) -> tuple[bytes, str | None]:
     """Shared optimizer/provider path: crop source, pad source, then compose boards."""
     if item.get("collageItems"):
-        content, _, mime = build_reference_collage_bytes(item, deadline)
+        content, _, mime = build_reference_collage_bytes(item, deadline, prefer_original=prefer_original)
     else:
-        content, mime = reference_source_bytes(item, deadline)
+        content, mime = reference_source_bytes(item, deadline, prefer_original=prefer_original)
         if item.get("providerCrop"):
             content = crop_provider_input_bytes(content, item["providerCrop"])
             mime = "image/jpeg"
@@ -960,7 +961,8 @@ def crop_provider_input_bytes(content: bytes, crop: dict[str, Any]) -> bytes:
         raise GenerationPhaseError("参考图无法解码或裁切", ERROR_INVALID_REQUEST) from exc
 
 
-def build_reference_collage_bytes(item: dict[str, Any], deadline: float | None = None) -> tuple[bytes, str, str]:
+def build_reference_collage_bytes(item: dict[str, Any], deadline: float | None = None,
+                                  *, prefer_original: bool = False) -> tuple[bytes, str, str]:
     sources = item.get("collageItems") if isinstance(item.get("collageItems"), list) else []
     images = []
     try:
@@ -970,7 +972,7 @@ def build_reference_collage_bytes(item: dict[str, Any], deadline: float | None =
     for source in sources:
         if not isinstance(source, dict):
             continue
-        content, _content_type = render_reference_input_bytes(source, deadline)
+        content, _content_type = render_reference_input_bytes(source, deadline, prefer_original=prefer_original)
         try:
             with Image.open(BytesIO(content)) as image:
                 image = ImageOps.exif_transpose(image)
@@ -1049,10 +1051,18 @@ def contain_on_white(image: Any, width: int, height: int) -> Any:
     return tile
 
 
-def reference_source_bytes(source: dict[str, Any], deadline: float | None = None) -> tuple[bytes, str | None]:
+def reference_source_bytes(source: dict[str, Any], deadline: float | None = None,
+                           *, prefer_original: bool = False) -> tuple[bytes, str | None]:
     object_key = source.get("objectKey")
     source_url = source.get("providerUrl") or source.get("url")
     if object_key and object_exists(str(object_key)):
+        if prefer_original:
+            from PIL import Image
+            content = get_bytes(str(object_key))
+            with Image.open(BytesIO(content)) as image:
+                if image.format in {"PNG", "JPEG", "WEBP"} and not getattr(image, "is_animated", False):
+                    return content, Image.MIME[image.format]
+            # Other import formats still require the supported normalized copy.
         source_key = normalized_or_original_key(str(object_key))
         return get_bytes(source_key), mimetypes.guess_type(str(source.get("filename") or source_key))[0]
     if source_url and str(source_url).startswith(("http://", "https://")):

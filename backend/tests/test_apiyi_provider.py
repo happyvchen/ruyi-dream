@@ -30,59 +30,87 @@ def configured(monkeypatch):
     monkeypatch.setattr(settings, "apiyi_image_size", "2880x2880")
     monkeypatch.setattr(settings, "apiyi_timeout_seconds", 360)
     monkeypatch.setattr(settings, "gpt_image2_output_format", "png")
-    monkeypatch.setattr(image_provider, "render_reference_input_bytes", lambda item, deadline: (picture(), "image/png"))
+    monkeypatch.setattr(image_provider, "render_reference_input_bytes", lambda item, deadline, **kwargs: (picture(), "image/png"))
     return settings
 
 
-def test_small_reference_is_byte_identical():
-    original = picture()
-    result, _ = apiyi.compress_references([original])
+@pytest.mark.parametrize("size_bytes", [1_500_001, 10_000_000])
+@pytest.mark.parametrize("fmt", ["PNG", "JPEG", "WEBP"])
+def test_under_recommendation_is_byte_identical_with_no_edge_cap(fmt, size_bytes):
+    source = picture(fmt, (4000, 1000))
+    original = source + b"\0" * (size_bytes - len(source))
+    result, facts = apiyi.compress_references([original])
     assert result == [original]
+    assert facts[0]["compressionMethod"] == "unchanged"
+    assert facts[0]["uploadedDimensions"] == [4000, 1000]
 
 
 @pytest.mark.parametrize("fmt", ["PNG", "JPEG", "WEBP"])
-def test_large_reference_preserves_format_and_never_upscales(fmt):
-    original = picture(fmt, (4000, 1000)) + b"\0" * 1_500_001
+def test_oversized_reference_uses_lossless_encoding_at_original_dimensions(fmt):
+    original = picture(fmt, (4000, 1000)) + b"\0" * apiyi.RECOMMENDED_IMAGE_BYTES
     result, facts = apiyi.compress_references([original])
-    with Image.open(BytesIO(result[0])) as image:
-        assert image.format == fmt
-        assert image.size == (2048, 512)
-    assert facts[0]["uploadedBytes"] < facts[0]["originalBytes"]
-    small = picture(fmt, (100, 50)) + b"\0" * 1_500_001
-    with Image.open(BytesIO(apiyi.compress_references([small])[0][0])) as image:
-        assert image.size == (100, 50)
+    with Image.open(BytesIO(original)) as source, Image.open(BytesIO(result[0])) as uploaded:
+        assert uploaded.size == source.size == (4000, 1000)
+        assert uploaded.convert("RGBA").tobytes() == source.convert("RGBA").tobytes()
+    assert facts[0]["compressionMethod"] == "lossless"
+    assert len(result[0]) <= apiyi.RECOMMENDED_IMAGE_BYTES
 
 
-def test_total_budget_also_applies_to_many_small_images():
-    source = picture(size=(700, 700), noise=True)
-    assert len(source) < apiyi.SINGLE_IMAGE_BYTES
-    result, _ = apiyi.compress_references([source] * 5)
-    assert len(result) == 5
-    assert sum(map(len, result)) <= apiyi.TOTAL_IMAGE_BYTES
+def test_large_group_preserves_every_reference_and_order():
+    contents = [picture(size=(700, 700), noise=True) + bytes([i]) * 2_000_000 for i in range(16)]
+    assert sum(map(len, contents)) > 50_000_000
+    result, facts = apiyi.compress_references(contents)
+    assert result == contents
+    assert all(fact["compressionMethod"] == "unchanged" for fact in facts)
+    assert all("aggregateBudgetExceeded" not in fact for fact in facts)
 
 
-def test_compression_failure_retains_original_and_continues():
-    broken = b"not an image" * 150_000
-    good = picture()
-    result, facts = apiyi.compress_references([broken, good])
-    assert result == [broken, good]
-    assert facts[0]["compressionFallback"]
+def test_processing_failure_stops_before_paid_submission(configured, monkeypatch):
+    monkeypatch.setattr(image_provider, "render_reference_input_bytes", lambda *args, **kwargs: (b"broken", "image/png"))
+    monkeypatch.setattr(apiyi.requests, "post", lambda *a, **kw: pytest.fail("unexpected paid POST"))
+    with pytest.raises(ValueError, match="第 1 张参考图准备失败"):
+        asyncio.run(apiyi.GPTImage2ApiyiProvider().submit({"prompt": "edit", "imageInputs": [{}]}, "unused"))
 
 
-def test_impossible_budget_records_fallback_without_shrinking_healthy_inputs():
-    broken = b"x" * (apiyi.TOTAL_IMAGE_BYTES + 1)
-    good = picture()
-    result, facts = apiyi.compress_references([broken, good])
-    assert result == [broken, good]
-    assert all(item["aggregateBudgetExceeded"] for item in facts)
+@pytest.mark.parametrize("budget,method", [(200_000, "quality"), (10_000, "resize")])
+def test_quality_before_resize_and_only_oversized_input_changes(monkeypatch, budget, method):
+    monkeypatch.setattr(apiyi, "RECOMMENDED_IMAGE_BYTES", budget)
+    source = picture(size=(500, 400), noise=True)
+    healthy = picture()
+    result, facts = apiyi.compress_references([source, healthy])
+    assert result[1] == healthy
+    assert len(result[0]) <= budget
+    assert facts[0]["compressionMethod"] == method
+    with Image.open(BytesIO(result[0])) as uploaded:
+        if method == "quality":
+            assert uploaded.size == (500, 400)
+        else:
+            assert uploaded.width < 500 and uploaded.height < 400
+            assert abs(uploaded.width / uploaded.height - 1.25) < 0.02
 
 
 def test_png_alpha_survives_reencoding():
     source = BytesIO()
     Image.new("RGBA", (100, 50), (10, 20, 30, 123)).save(source, "PNG")
-    result, _ = apiyi.compress_references([source.getvalue() + b"\0" * 1_500_001])
+    result, _ = apiyi.compress_references([source.getvalue() + b"\0" * apiyi.RECOMMENDED_IMAGE_BYTES])
     with Image.open(BytesIO(result[0])) as image:
+        assert image.size == (100, 50)
         assert image.getpixel((0, 0)) == (10, 20, 30, 123)
+
+
+def test_lossy_webp_retains_alpha_and_color_profile(monkeypatch):
+    monkeypatch.setattr(apiyi, "RECOMMENDED_IMAGE_BYTES", 200_000)
+    with Image.open(BytesIO(picture(size=(500, 400), noise=True))) as source:
+        rgba = source.convert("RGBA")
+    rgba.putalpha(123)
+    buf = BytesIO()
+    rgba.save(buf, "PNG", icc_profile=b"test-profile")
+    result, facts = apiyi.compress_references([buf.getvalue()])
+    assert facts[0]["compressionMethod"] == "quality"
+    with Image.open(BytesIO(result[0])) as uploaded:
+        assert uploaded.size == rgba.size
+        assert uploaded.getchannel("A").tobytes() == rgba.getchannel("A").tobytes()
+        assert uploaded.info["icc_profile"] == b"test-profile"
 
 
 class Response:
@@ -125,6 +153,8 @@ def test_multipart_and_base64_delivery(configured, monkeypatch):
     assert not {"response_format", "input_fidelity", "image_urls", "client_business_id"} & kwargs["data"].keys()
     assert [name for name, _ in kwargs["files"]] == ["image[]", "image[]"]
     assert [item["objectKey"] for item in result["providerReferenceImageManifest"]] == ["first", "second"]
+    assert all(item["providerInputPolicyVersion"] == "apiyi_multipart_v2"
+               for item in result["providerReferenceImageManifest"])
     assert result["providerRequestId"] is None
     assert result["httpRequestId"] == "req-log-only"
     assert result["outputPath"] == "result.png"
@@ -150,6 +180,20 @@ def test_explicit_http_failure_preserves_request_id(configured, monkeypatch):
         asyncio.run(apiyi.GPTImage2ApiyiProvider().submit({"prompt": "edit", "imageInputs": [{}]}, "unused"))
     assert error.value.error_code == "AUTH_FAILED"
     assert error.value.provider_response["httpRequestId"] == "req-log-only"
+
+
+
+def test_explicit_size_rejection_does_not_recompress_or_retry(configured, monkeypatch):
+    calls = []
+    response = Response()
+    response.status_code = 413
+    response.json = lambda: {"error": {"message": "request body too large"}}
+    monkeypatch.setattr(apiyi.requests, "post", lambda *a, **kw: calls.append(kw) or response)
+    with pytest.raises(image_provider.ImageProviderError) as error:
+        asyncio.run(apiyi.GPTImage2ApiyiProvider().submit({"prompt": "edit", "imageInputs": [{}]}, "unused"))
+    assert len(calls) == 1
+    assert "too large" in str(error.value)
+    assert error.value.provider_response["providerResponse"] == response.json()
 
 
 @pytest.mark.parametrize("failure", ["timeout", "http504", "malformed"])
@@ -226,3 +270,69 @@ def test_timeout_floor_and_production_snapshot(configured, monkeypatch):
     monkeypatch.setattr(configured, "apiyi_image_model", "gpt-image-2.5-sunburst")
     with pytest.raises(RuntimeError, match="snapshot"):
         configured.validate()
+
+
+def test_original_source_bypasses_normalized_edge_cap_and_retains_frozen_geometry(monkeypatch):
+    original = picture(size=(9000, 100))
+    normalized = picture(size=(8000, 89))
+    monkeypatch.setattr(image_provider, "object_exists", lambda key: True)
+    monkeypatch.setattr(image_provider, "normalized_or_original_key", lambda key: "normalized.jpg")
+    monkeypatch.setattr(image_provider, "get_bytes", lambda key: original if key == "source.png" else normalized)
+    source = {"objectKey": "source.png"}
+    assert image_provider.render_reference_input_bytes(source)[0] == normalized
+    assert image_provider.render_reference_input_bytes(source, prefer_original=True)[0] == original
+    cropped, _ = image_provider.render_reference_input_bytes(
+        {**source, "providerCrop": {"kind": "keep_top_ratio", "ratio": 0.5}}, prefer_original=True)
+    with Image.open(BytesIO(cropped)) as image:
+        assert image.size == (9000, 50)
+
+
+def test_original_preference_propagates_into_collage(monkeypatch):
+    calls = []
+    def read(source, deadline, *, prefer_original=False):
+        calls.append(prefer_original)
+        return picture(), "image/png"
+    monkeypatch.setattr(image_provider, "reference_source_bytes", read)
+    image_provider.render_reference_input_bytes(
+        {"collageItems": [{"objectKey": "one"}, {"objectKey": "two"}]}, prefer_original=True)
+    assert calls == [True, True]
+
+
+def test_unsupported_original_format_uses_normalized_copy(monkeypatch):
+    original, normalized = picture("TIFF"), picture()
+    monkeypatch.setattr(image_provider, "object_exists", lambda key: True)
+    monkeypatch.setattr(image_provider, "normalized_or_original_key", lambda key: "normalized.png")
+    monkeypatch.setattr(image_provider, "get_bytes", lambda key: original if key == "original.tiff" else normalized)
+    content, _ = image_provider.render_reference_input_bytes({"objectKey": "original.tiff"}, prefer_original=True)
+    assert content == normalized
+
+
+def test_reencoded_webp_uses_matching_multipart_mime(configured, monkeypatch):
+    monkeypatch.setattr(apiyi, "RECOMMENDED_IMAGE_BYTES", 200_000)
+    source = picture(size=(500, 400), noise=True)
+    def render(item, deadline, *, prefer_original=False):
+        assert prefer_original
+        return source, "image/png"
+    monkeypatch.setattr(image_provider, "render_reference_input_bytes", render)
+    calls = []
+    monkeypatch.setattr(apiyi.requests, "post", lambda *args, **kwargs: calls.append(kwargs) or Response())
+    result = asyncio.run(apiyi.GPTImage2ApiyiProvider().submit({"prompt": "edit", "imageInputs": [{}]}, "unused"))
+    filename, content, mime = calls[0]["files"][0][1]
+    assert filename == "reference-1.webp" and mime == "image/webp"
+    with Image.open(BytesIO(content)) as uploaded:
+        assert uploaded.size == (500, 400)
+    assert result["providerReferenceImageManifest"][0]["compressionMethod"] == "quality"
+
+
+def test_reencoding_applies_exif_orientation_once():
+    source = Image.new("RGB", (100, 50), "red")
+    exif = Image.Exif()
+    exif[274] = 6
+    buf = BytesIO()
+    source.save(buf, "JPEG", exif=exif)
+    result, facts = apiyi.compress_references([buf.getvalue() + b"\0" * apiyi.RECOMMENDED_IMAGE_BYTES])
+    with Image.open(BytesIO(result[0])) as uploaded:
+        assert uploaded.size == (50, 100)
+        assert uploaded.getexif().get(274, 1) == 1
+    assert facts[0]["originalDimensions"] == [100, 50]
+    assert facts[0]["uploadedDimensions"] == [50, 100]

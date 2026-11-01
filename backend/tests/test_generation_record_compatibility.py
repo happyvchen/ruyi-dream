@@ -192,7 +192,7 @@ def test_reference_transport_preserves_all_sources_and_is_idempotent(monkeypatch
     assert adapt_replay_references(package) == package
     assert image_provider.build_toapis_request_snapshot(package, [f'url-{i}' for i in range(limit)])['prompt'] == package['prompt']
     seen = []
-    def read(source, *_args):
+    def read(source, *_args, **kwargs):
         seen.append(source['objectKey'])
         output = BytesIO()
         Image.new('RGB', (30, 40), (255, 0, 0)).save(output, 'PNG')
