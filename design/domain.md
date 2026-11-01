@@ -10,7 +10,7 @@
 - `GenerationTaskInputVersion`：冻结的主推款、模特、服装事实和用户要求。
 - `GenerationStyling` / `StylingPlan`：AI Stylist 的商品理解与最终选搭、穿法、配饰和空搭配原因；旧候选与审美诊断只读兼容。
 - `Pose`：独立姿势库条目，保存原图、标签与状态。
-- `GenerationPoseSelection`：基于已选造型的五镜头姿势选择，冻结共享背景、五个不同姿势、动作、理由、成片规则及商品与模特输入版本。
+- `GenerationPoseSelection`：基于已选造型的五镜头姿势选择，冻结共享背景、五个不同姿势、标签与理由、成片规则及商品与模特输入版本。
 - `ShotPresetSlot`：历史任务的母版/姿势资产对；新流程不读取该表。
 - `GenerationResultSetShotPreset`：结果集创建时从姿势选择复制的五组共享背景/独立姿势资产；旧任务从原槽位冻结。
 - `GenerationResultSet`：冻结输入版本、StylingPlan 和背景和五个姿势图片的一组五张成片。
@@ -25,7 +25,7 @@
 | 人物身份 | 数字模特参考图 |
 | 场景与光线 | 统一背景图，选姿势时冻结并由结果集引用 |
 | 构图、景别、裁切、人物尺度 | 三类成片 Prompt 五镜头要求 |
-| 人物姿势、动作与表情 | 姿势库原图与 GenerationPoseSelection 冻结动作 |
+| 人物姿势、动作与表情 | GenerationPoseSelection 冻结的姿势原图；标签仅用于选姿，历史动作说明只读保留 |
 | 五镜头构图与禁止项 | 三类固定成片 Prompt |
 | 参考图顺序、数量和请求参数 | 产品组装代码 |
 | 视觉生成 | GPT Image-2.5 Sunburst edits |

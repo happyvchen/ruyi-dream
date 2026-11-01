@@ -2155,14 +2155,14 @@ def migration_pose_shot_sections(db: sqlite3.Connection) -> None:
 
 def migration_optimizer_pose_grid(db: sqlite3.Connection) -> None:
     """Add the explicit transport instructions to editable rules, not history."""
-    from .prompt_render import extract_prompt_section
     if not table_exists(db, "prompt_configs"):
         return
     title = "优化阶段的姿势宫格与最终图号"
     row = db.execute("SELECT content FROM prompt_configs WHERE key = 'assembly.final_prompt_optimizer'").fetchone()
     if not row or not str(row["content"] or "").strip() or f"## {title}" in row["content"]:
         return
-    template = (Path(__file__).resolve().parents[1] / "prompt_templates" / "final_prompt_optimizer.txt").read_text(encoding="utf-8")
-    section = extract_prompt_section(template, title)
+    # Freeze the released migration payload: current authoring templates may
+    # rename/remove sections and must not break an existing database's upgrade.
+    section = (Path(__file__).resolve().parents[1] / "prompt_templates" / "migration_091_optimizer_pose_grid.txt").read_text(encoding="utf-8").strip()
     content = str(row["content"]) + f"\n\n## {title}\n" + section + "\n"
     db.execute("UPDATE prompt_configs SET content = ?, updated_at = ? WHERE key = 'assembly.final_prompt_optimizer'", (content, now_iso()))

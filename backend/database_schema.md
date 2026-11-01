@@ -167,3 +167,9 @@ GenerationTask
 ## 091：优化阶段姿势宫格
 
 不改表结构。新结果集 `prompt_preparation_json.optimizerReferenceLayout` 为 `pose_grid_v1`，已有记录缺省保持旧协议。新调用记录同一版本字段，`batchRequests` 保留单次实际输入和含宫格来源、裁切、格号的附件事实；局部图号仍指向各镜头最终原始图片。迁移仅向非空的当前 `assembly.final_prompt_optimizer.content` 追加明确的参考板职责与图号转换章节，保留原正文和 enabled，幂等且不改历史请求、成片、准备记录或旧快照。
+
+## 姿势原图复刻协议
+
+不变更表结构。新结果集在现有 `prompt_preparation_json` 中冻结 `poseInstructionSource=reference_image_v1`；成片运行时 `shot_pose` 为空。历史准备记录缺少此标记时保留旧动作文本协议。姿势选择的 `direction` 字段继续兼容存储，当前模型可不输出，归一为空字符串。当前 Prompt 更新前备份全部配置，仅修改识别、选姿、优化器及三类成片正文；不回写标签、选择、结果集或 attempts，不触发 provider。
+
+新结果集另冻结 `referenceGeometry=original_v1`，不设置 `referenceCanvas`；新任务包不附加姿势裁切，优化姿势板不额外补方。旧结果集缺少该标记时仍按历史裁切表和已冻结画布策略恢复。无表结构迁移，不回写历史数据。

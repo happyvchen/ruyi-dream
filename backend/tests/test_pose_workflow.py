@@ -355,7 +355,8 @@ def test_failed_pose_reselection_retries_pose_instead_of_reusing_old_selection(m
     assert app_main.next_auto_final_step(app_main.get_generation_task_row(ids['task_id'])) == 'pose'
 
 
-def test_final_prompt_receives_selected_direction_without_legacy_pose_slots(client, monkeypatch):
+@pytest.mark.parametrize("legacy", [False, True])
+def test_final_prompt_uses_pose_image_and_preserves_legacy_direction(client, monkeypatch, legacy):
     ids = prepare_task()
     _, asset_id, code = seed_pose()
     with get_db() as db:
@@ -369,6 +370,13 @@ def test_final_prompt_receives_selected_direction_without_legacy_pose_slots(clie
     response = client.post(f'/api/generation-tasks/{ids["task_id"]}/generate-final')
     assert response.status_code == 200, response.text
     image_id = response.json()['item']['resultSet']['images'][0]['id']
+    result_set_id = response.json()['item']['resultSet']['id']
+    preparation = app_main.read_final_preparation(result_set_id)
+    if legacy:
+        preparation.pop('poseInstructionSource', None)
+        app_main.save_final_preparation(result_set_id, preparation)
+    else:
+        assert preparation['poseInstructionSource'] == 'reference_image_v1'
     captured = []
     def inputs(styling_id, input_id, preset):
         captured.append(dict(preset))
@@ -376,8 +384,22 @@ def test_final_prompt_receives_selected_direction_without_legacy_pose_slots(clie
     monkeypatch.setattr(app_main, 'build_direct_final_image_inputs', inputs)
     package = app_main.build_new_final_task_package(ids['task_id'], image_id)
     assert captured[0]['pose_asset_id'] == asset_id
-    assert '镜头1保持原图肩胸支撑与手部接触' in package['prompt']
-    assert package['promptRuntime']['shot_pose'] == '镜头1保持原图肩胸支撑与手部接触'
+    direction = '镜头1保持原图肩胸支撑与手部接触'
+    assert (direction in package['prompt']) is legacy
+    assert package['promptRuntime']['shot_pose'] == (direction if legacy else '')
+    from app.prompt_optimization import optimizer_input
+    source = optimizer_input({str(image_id): package})['shots'][0]['sourcePrompt']
+    assert (direction in source) is legacy
+
+
+def test_pose_plan_accepts_selection_without_action_instructions():
+    shots = [{"shotIndex": i, "poseCode": f"P{i}", "imageId": i,
+              "reason": "朝向与持物方式适配"} for i in range(1, 6)]
+    result = validate_pose_plan({"shots": shots}, {f"P{i}": {i} for i in range(1, 6)})
+    assert all(shot['direction'] == '' for shot in result)
+    shots[0]['reason'] = ''
+    with pytest.raises(ValueError, match='选择理由'):
+        validate_pose_plan({"shots": shots}, {f"P{i}": {i} for i in range(1, 6)})
 
 
 def test_single_image_pose_rejects_multiple_uploads_append_and_removal(client, monkeypatch):
@@ -591,7 +613,7 @@ def test_pose_reference_budget_preserves_all_products_in_single_call(monkeypatch
                    (dumps([{'code': 'GARMENT', 'images': garments}]), ids['styling_id']))
     content = BytesIO()
     Image.new('RGB', (40, 80), 'red').save(content, 'PNG')
-    read = lambda *_args: (content.getvalue(), 'image/png')
+    read = lambda *_args, **kwargs: (content.getvalue(), 'image/png')
     monkeypatch.setattr(app_main, 'gemini_channel', lambda: 'toapis')
     monkeypatch.setattr(image_provider, 'reference_source_bytes', read)
     monkeypatch.setattr(image_provider, 'REFERENCE_COLLAGE_TILE_SIZE', 80)

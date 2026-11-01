@@ -130,8 +130,9 @@ def test_final_prompt_templates_separate_background_pose_and_shot_controls(filen
 
     assert "背景参考是空间、墙地关系、材质、反射和照明的唯一来源" in template
     assert "不从姿势人物借用体型" in template
-    assert "不为复刻新增口袋" in template
-    assert "不交换左右或前后腿" in template
+    assert "不新增口袋、支撑或道具" in template
+    assert "前后错步/交叉" in template
+    assert "不混用肢体，不镜像" in template
     assert "唯一的拍摄母版" not in template
     assert "中央全高 3:4 裁切窗口" in template
     assert "中央 2:3" not in template
@@ -374,7 +375,8 @@ def test_bottom_closeup_and_expression_rules_do_not_expand_each_other(monkeypatc
         text = app_main.render_prompt_template(key, runtime)
         assert '{{' not in text
         assert ('腰头完整入画并靠近画面上部' in text) == (index == 2)
-        assert ('## 画内头部与表情复刻' in text) == (index != 2)
+        assert text.count('## 姿势复刻边界') == 1
+        assert '也不为展示手脚或脸扩大景别' in text
         assert ('#FFFFFF' in text) == (index == 5)
         assert '模特前左侧约 45 度' not in text
         assert '身高：175cm' not in text  # no sample/default body facts leak

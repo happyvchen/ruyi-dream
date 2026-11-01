@@ -105,7 +105,7 @@ from .generation_progress import (
     normalize_toapis_error,
     provider_error_presentation,
 )
-from .image_provider import ImageProviderError, get_image_provider, render_reference_input_bytes, SQUARE_WHITE_CANVAS
+from .image_provider import ImageProviderError, get_image_provider, render_reference_input_bytes
 from .media_storage import (
     is_accepted_upload_key,
     media_original_key_for_owner,
@@ -158,7 +158,7 @@ IMAGE2_DIRECT_HERO_SOURCE_LIMIT = 6
 IMAGE2_DIRECT_STYLING_SOURCE_LIMIT = 4
 # 姿势参考按镜头预裁切：provider 只收到与当前景别相符的动作参考，
 # 避免全身姿势图把每个镜头都拉回全身构图。值为保留图片上部的比例。
-IMAGE2_DIRECT_POSE_CROP: dict[tuple[str, int], float] = {
+LEGACY_IMAGE2_DIRECT_POSE_CROP: dict[tuple[str, int], float] = {
     ("top", 2): 0.45,
     ("top", 1): 0.78,
     ("top", 3): 0.40,
@@ -5717,8 +5717,9 @@ def freeze_final_prompt_configuration(category_family: str) -> dict[str, Any]:
         raise HTTPException(409, "请先在 Prompt 维护中保存成片提示词优化规则")
     return {
         "mode": "optimized" if enabled else "direct", "status": "PENDING" if enabled else "DIRECT",
-        "referenceCanvas": SQUARE_WHITE_CANVAS,
+        "referenceGeometry": "original_v1",
         "optimizerReferenceLayout": POSE_GRID_LAYOUT,
+        "poseInstructionSource": "reference_image_v1",
         "configRows": referenced_configs(rows, [FINAL_IMAGE_PROMPT_CONFIG_KEYS[category_family], OPTIMIZER_KEY, "assembly.final_prompt_optimizer_input"]),
         "packages": {},
     }
@@ -11295,6 +11296,15 @@ def build_new_final_task_package(task_id: int, result_image_id: int) -> dict[str
         preset,
     )
     preparation = loads(row_value(row, "prompt_preparation_json"), {})
+    # Only historical sets reconstruct the old fixed crop. New references retain
+    # the whole source; shot framing is an output instruction, not an input crop.
+    if preparation.get("referenceGeometry") != "original_v1":
+        ratio = LEGACY_IMAGE2_DIRECT_POSE_CROP.get((str(preset["category_family"]), int(preset["shot_index"])))
+        if ratio:
+            image_inputs = [
+                {**item, "providerCrop": {"kind": "keep_top_ratio", "ratio": ratio}}
+                if item.get("role") == "shot_pose" else item for item in image_inputs
+            ]
     # Freeze transport geometry with the result set. Old packages/results keep their
     # original geometry, including when an interrupted unsent slot is reconstructed.
     if preparation.get("referenceCanvas"):
@@ -11323,9 +11333,10 @@ def build_new_final_task_package(task_id: int, result_image_id: int) -> dict[str
         shot = next((item for item in selection["shots"] if item["shotIndex"] == int(row["sort_order"])), None)
         if not shot:
             raise RuntimeError("冻结的姿势选搭缺少当前镜头")
-        # 姿势动作只注入一次：模板已有独立的“已选姿势”行，重复拼接会把
-        # 姿势标签 JSON 塞进配饰与造型描述，稀释商品与造型事实。
-        prompt_runtime["shot_pose"] = render_pose_direction(shot["direction"])
+        # New result sets use the pose image only. Preserve the text protocol when
+        # reconstructing historical sets whose frozen preparation has no marker.
+        if preparation.get("poseInstructionSource") != "reference_image_v1":
+            prompt_runtime["shot_pose"] = render_pose_direction(shot["direction"])
     preparation = loads(row_value(row, "prompt_preparation_json"), {})
     frozen_rows = preparation.get("configRows")
     if frozen_rows:
@@ -11344,6 +11355,7 @@ def build_new_final_task_package(task_id: int, result_image_id: int) -> dict[str
         "imageInputs": image_inputs,
         "shotPresetVersionId": row["shot_preset_version_id"],
         "shotPresetSnapshotId": int(preset["id"]),
+        "referenceGeometry": preparation.get("referenceGeometry"),
         "finalImageUserInstruction": final_image_user_instruction,
         "stylingPlan": styling_plan,
         "shotRole": row["shot_role"],
@@ -11395,16 +11407,11 @@ def build_direct_final_image_inputs(
     input_version_id: int,
     preset: Any,
 ) -> list[dict[str, Any]]:
-    category_family = str(preset["category_family"] or "")
-    shot_index = int(preset["shot_index"] or 0)
     background = get_media_asset_by_id(int(preset["background_asset_id"]))
     pose = get_media_asset_by_id(int(preset["pose_asset_id"]))
     if not background or not pose:
         raise RuntimeError("冻结的拍摄背景或姿势图不可用")
     pose_input = image_input_from_asset(pose, "shot_pose")
-    pose_crop_ratio = IMAGE2_DIRECT_POSE_CROP.get((category_family, shot_index))
-    if pose_crop_ratio:
-        pose_input["providerCrop"] = {"kind": "keep_top_ratio", "ratio": pose_crop_ratio}
     inputs: list[dict[str, Any]] = [
         image_input_from_asset(background, "shot_background"),
         pose_input,
@@ -11997,7 +12004,7 @@ def available_prompt_placeholders() -> list[dict[str, str]]:
             ("pose_context", "姿势识别条目与图片清单"), ("pose_phase", "姿势选搭阶段（固定 shortlist，初筛即定选）"),
             ("pose_candidates", "可选姿势标签和图片标识"), ("pose_shortlist", "旧配置兼容占位，固定为空列表"),
             ("pose_user_instruction", "本次姿势要求"), ("pose_shots", "仅引用对应品类成片 Prompt 的「机位&景别」章节，按五镜头分别展开；不含其他成片正文"),
-            ("pose_image_manifest", "初筛实际传入的商品和背景图片顺序与角色"), ("shot_pose", "当前镜头冻结的姿势动作说明"),
+            ("pose_image_manifest", "初筛实际传入的商品和背景图片顺序与角色"), ("shot_pose", "历史动作说明占位符；新结果集为空，动作仅取姿势原图"),
             ("model_body_facts", "当前输入版本冻结的模特身高、体型及围度；缺失时为空"),
         )],
         {"name": "segment.brand_info", "scope": "segment", "description": "品牌信息分段 Prompt"},

@@ -504,8 +504,7 @@ def test_direct_final_inputs_keep_order_and_fourteen_slot_budget(monkeypatch, sh
         *[f"styling/{index}.jpg" for index in range(4)],
     ]
     assert all(item["materialCode"] == "PANTS-1" for item in inputs[10:])
-    crop = app_main.IMAGE2_DIRECT_POSE_CROP.get(("top", shot_index))
-    assert inputs[1].get("providerCrop") == ({"kind": "keep_top_ratio", "ratio": crop} if crop else None)
+    assert all("providerCrop" not in item and "providerCanvas" not in item for item in inputs)
 
 
 def test_six_source_reference_board_uses_all_tiles() -> None:
@@ -687,7 +686,7 @@ def test_model_grid_is_two_by_two_without_cropping_or_repeating_sources(monkeypa
     from PIL import Image
     colors = [(220, 10, 10), (10, 220, 10), (10, 10, 220), (220, 220, 10)]
     monkeypatch.setattr(image_provider, 'REFERENCE_COLLAGE_TILE_SIZE', 80)
-    def read(source, deadline=None):
+    def read(source, deadline=None, **kwargs):
         data = BytesIO()
         Image.new('RGB', (40, 80), colors[source['index']]).save(data, 'PNG')
         return data.getvalue(), 'image/png'
@@ -759,7 +758,7 @@ def test_square_canvas_crop_precedes_padding_and_optimizer_matches_upload(monkey
     original = Image.new('RGB', (30, 80), 'red')
     original.paste('blue', (0, 40, 30, 80))
     original.save(raw, 'PNG')
-    monkeypatch.setattr(image_provider, 'reference_source_bytes', lambda *args: (raw.getvalue(), 'image/png'))
+    monkeypatch.setattr(image_provider, 'reference_source_bytes', lambda *args, **kwargs: (raw.getvalue(), 'image/png'))
     item = {'role': 'shot_pose', 'objectKey': 'pose.png', 'providerCanvas': image_provider.SQUARE_WHITE_CANVAS,
             'providerCrop': {'kind': 'keep_top_ratio', 'ratio': .5},
             'providerUrl': 'https://files.toapis.cn/old.png', 'providerInputPolicyVersion': 'toapis-input-v2'}
@@ -803,7 +802,7 @@ def test_square_canvas_before_collage_and_url_input_on_fal(monkeypatch):
 
 
 def test_legacy_reference_without_canvas_keeps_original_bytes(monkeypatch):
-    monkeypatch.setattr(image_provider, 'reference_source_bytes', lambda *args: (b'original', 'image/png'))
+    monkeypatch.setattr(image_provider, 'reference_source_bytes', lambda *args, **kwargs: (b'original', 'image/png'))
     assert image_provider.render_reference_input_bytes({'objectKey': 'old'}) == (b'original', 'image/png')
     with pytest.raises(RuntimeError, match='未知的参考图画布策略'):
         image_provider.render_reference_input_bytes({'objectKey': 'old', 'providerCanvas': 'unknown'})

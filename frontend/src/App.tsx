@@ -10078,7 +10078,7 @@ function PoseSelectionSummary({ selection }: { selection: PoseSelection }) {
         {[{ title: selection.workflow === 'shared_background_v1' ? '统一背景' : '历史拍摄母版', asset: shot.background }, { title: '选定姿势', asset: shot.pose }].map(({ title, asset }) => <ImageAssetCard key={title} title={title} thumbnailSrc={asset ? mediaUrl(assetThumbSrc(asset)) : null} onOpen={asset ? () => setViewer(assetLightboxImage(asset, [shot.background, shot.pose].filter((item): item is MediaAsset => !!item))) : undefined} />)}
       </div>
       <div className="tag-summary"><span>{poseFrameLayout(shot.aiTags ?? {}) || '历史布局未记录'}</span>{typeof shot.aiTags?.['视图组合'] === 'string' && <span>{shot.aiTags['视图组合']}</span>}</div>
-      <p>{shot.reason}</p><details><summary>动作说明</summary><p>{shot.direction}</p></details>
+      <p>{shot.reason}</p>{shot.direction && <details><summary>动作说明</summary><p>{shot.direction}</p></details>}
     </article>)}</div>
     {viewer && <ImageLightbox image={viewer} onClose={() => setViewer(null)} />}
   </div>

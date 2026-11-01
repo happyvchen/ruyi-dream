@@ -78,8 +78,11 @@ def optimizer_reference_plan(packages: dict[str, dict[str, Any]], layout: str | 
         grid = {"role": "shot_pose", "filename": "optimizer-poses.jpg",
                 "referenceBoardKind": "optimizer_pose_grid", "collageItems": sources,
                 "collageRule": {"kind": "optimizer_pose_grid_3x2", "cells": slots, "notPersisted": True},
-                "tileLabels": [f"SHOT {i}" if i in slots else "EMPTY" for i in range(1, 7)],
-                "providerCanvas": "square_white_v1"}
+                "tileLabels": [f"SHOT {i}" if i in slots else "EMPTY" for i in range(1, 7)]}
+        # Preserve old frozen grids; new grids have only their layout canvas,
+        # without an additional square-white padding pass.
+        if not all(package.get("referenceGeometry") == "original_v1" for package in packages.values()):
+            grid["providerCanvas"] = "square_white_v1"
     manifest, seen, images = [], {}, []
     for shot in inputs["shots"]:
         for reference, item in zip(shot["references"], packages[shot["shotId"]]["imageInputs"]):

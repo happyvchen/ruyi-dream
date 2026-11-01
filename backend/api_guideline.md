@@ -187,7 +187,7 @@ AI 选搭动态事实：
 - `POST /api/shoot-environment`：admin 使用 multipart `file` 替换背景。
 - `DELETE /api/shoot-environment`：admin 清除当前背景；历史选姿势和结果仍引用的图片保留。
 
-新姿势选择返回 `poseSelection.workflow = shared_background_v1`，五个 shots 共享同一 background，pose 各不相同。初筛和复核均传入商品图片；复核额外传入候选姿势原图。无背景、当前品类成片 Prompt 未配置或可用姿势不足五个时，选姿势在调用 provider 前失败。历史无 workflow 的选择返回 legacy_masters。
+新姿势选择返回 `poseSelection.workflow = shared_background_v1`，五个 shots 共享同一 background，pose 各不相同。当前仅初筛，传入商品和背景图片、全库标签，不传候选姿势原图，也不调用复核。无背景、当前品类成片 Prompt 未配置或可用姿势不足五个时，选姿势在调用 provider 前失败。历史无 workflow 的选择返回 legacy_masters。
 
 ## 历史拍摄预设接口
 
@@ -196,7 +196,7 @@ AI 选搭动态事实：
 - `DELETE /api/shot-presets/{category_family}/{shot_index}/{asset_role}`：仅 admin 删除当前单张图片并立即生效；该类型不完整期间不能开始新成片。
 - 旧整槽保存和发布接口返回 `410 Gone`。
 
-最终请求固定 `image_urls <= 14`，共享背景排第一，不传 `mask_url`，使用 `1:1 / 2k / high`；依次输入背景、姿势、模特首图、含首图的前四张模特 2×2 宫格、主推款前六张、搭配款合计前四张。商品图逐张输入，姿势图沿用镜头景别预裁切后作为运行时传输副本上传；结果集通过 `generation_result_set_shot_presets` 保存共享背景与五个姿势；姿势选择阶段已冻结这些引用。
+最终请求固定 `image_urls <= 14`，共享背景排第一，不传 `mask_url`，使用 `1:1 / 2k / high`；依次输入背景、姿势、模特首图、含首图的前四张模特 2×2 宫格、主推款前六张、搭配款合计前四张。商品图逐张输入，新结果集姿势图保留完整画面，不预裁切、不额外补方；传输等比压缩不变；结果集通过 `generation_result_set_shot_presets` 保存共享背景与五个姿势；姿势选择阶段已冻结这些引用。
 
 ## 导出
 
@@ -239,6 +239,8 @@ AI 选搭动态事实：
 
 user 的 generation 系列 JSON 响应不含 poseSelection 参考图、姿势要求、原始调用快照与 provider 标识；保留后台状态和 active 指针用于恢复。配置错误转为业务提示，admin 与数据库快照保留原始事实。
 
+当前选姿模型输出每镜头 shotIndex、poseCode、imageId、reason，不要求 direction；API 为兼容保留 direction 字符串，缺省为空，旧值只读展示。新结果集不会将该字段注入成片或优化器源正文。
+
 任务增加 `poseWorkflowEnabled`、`activePoseSelectionId`、`poseSelection` 与 `stageUserInputs.poseSelection`；PATCH 支持 `poseSelectionUserInstruction`。状态增加 POSE_SELECTION_RUNNING / POSE_SELECTION_READY。结果集返回 `poseSelectionId`，成片始终读取该选择及冻结的五组图片。新任务不得跳过姿势选搭，历史任务默认兼容原流程；选搭失败、取消和中断沿用现有失败协议，晚到响应不覆盖取消。
 
 ## 完整记录与成片版本
@@ -272,7 +274,7 @@ user 的 generation 系列 JSON 响应不含 poseSelection 参考图、姿势要
 
 姿势选搭的 Prompt 预览使用与执行一致的章节渲染：`runtime.pose_shots` 只包含对应品类成片 Prompt 中五个镜头各自的「机位&景别」，历史上下文使用当时 runtime 事实并应用当前配置。预览诊断复用 `missingPlaceholders` 返回章节缺失、重复、镜头正文缺失等配置错误；实际选姿势在创建 attempt 和调用模型之前返回 409。选择历史记录不会改写 `historicalPrompt` 或历史快照。
 
-新优化调用/草稿预览的 `modelBatches` 通常仅一项，五镜头共用一张姿势参考板。用户消息 `shots[].references[].index` 为最终生图局部图号，`visionImageIndex` 为优化附件编号，姿势引用增加 `cell`；`imageManifest` 的姿势板含 `referenceBoardKind=optimizer_pose_grid`、3列2行、cells 与 emptyCells。实际生图请求图片列表不变。历史多批记录仍完整返回；只剩部分待处理镜头时单次调用显示实际镜头数。
+新优化调用/草稿预览的 `modelBatches` 通常仅一项，五镜头共用一张姿势参考板（新结果集使用完整原图，不额外补方）。用户消息 `shots[].references[].index` 为最终生图局部图号，`visionImageIndex` 为优化附件编号，姿势引用增加 `cell`；`imageManifest` 的姿势板含 `referenceBoardKind=optimizer_pose_grid`、3列2行、cells 与 emptyCells。实际生图请求图片列表不变。历史多批记录仍完整返回；只剩部分待处理镜头时单次调用显示实际镜头数。
 
 ### 成片恢复优先重试
 

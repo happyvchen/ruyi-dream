@@ -1,5 +1,6 @@
 import copy
 from io import BytesIO
+from pathlib import Path
 
 import pytest
 from PIL import Image
@@ -58,7 +59,7 @@ def test_grid_renders_real_crops_and_preserves_both_views_in_fifth_cell(monkeypa
     portrait.paste(Image.new("RGB", (100, 100), "red"), (0, 0))
     dual = Image.new("RGB", (200, 100), "green")
     dual.paste(Image.new("RGB", (100, 100), "yellow"), (100, 0))
-    def raw(item, deadline=None):
+    def raw(item, deadline=None, **kwargs):
         out = BytesIO()
         (portrait if item["objectKey"] == "pose-2" else dual).save(out, "PNG")
         return out.getvalue(), "image/png"
@@ -97,7 +98,15 @@ def test_legacy_transport_keeps_old_batches():
     assert len(optimizer_reference_plan(source)[1]) == 18
 
 
-def test_upgrade_appends_editable_guide_once_preserving_custom_rules_and_empty_slots():
+def test_upgrade_appends_editable_guide_once_preserving_custom_rules_and_empty_slots(monkeypatch):
+    original_read_text = Path.read_text
+
+    def read_without_authoring_template(path, *args, **kwargs):
+        if path.name == "final_prompt_optimizer.txt":
+            raise AssertionError("Released migration must not depend on the editable authoring template")
+        return original_read_text(path, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "read_text", read_without_authoring_template)
     with get_db() as db:
         db.execute("UPDATE prompt_configs SET content = '自定义规则\n保留原样', enabled = 1 WHERE key = 'assembly.final_prompt_optimizer'")
         migration_optimizer_pose_grid(db)
@@ -111,3 +120,25 @@ def test_upgrade_appends_editable_guide_once_preserving_custom_rules_and_empty_s
         db.execute("UPDATE prompt_configs SET content = '' WHERE key = 'assembly.final_prompt_optimizer'")
         migration_optimizer_pose_grid(db)
         assert db.execute("SELECT content FROM prompt_configs WHERE key = 'assembly.final_prompt_optimizer'").fetchone()[0] == ""
+
+
+def test_original_geometry_keeps_full_pose_and_does_not_pad_attachment(monkeypatch):
+    monkeypatch.setattr(image_provider, "REFERENCE_COLLAGE_TILE_SIZE", 200)
+    portrait = Image.new("RGB", (100, 200), "blue")
+    portrait.paste(Image.new("RGB", (100, 100), "red"), (0, 0))
+    out = BytesIO()
+    portrait.save(out, "PNG")
+    monkeypatch.setattr(image_provider, "reference_source_bytes", lambda *args, **kwargs: (out.getvalue(), "image/png"))
+    source = packages([2])
+    source["2"]["referenceGeometry"] = "original_v1"
+    _, images = optimizer_reference_plan(source, POSE_GRID_LAYOUT)
+    grid = images[1]
+    assert "providerCanvas" not in grid
+    assert "providerCrop" not in grid["collageItems"][0]
+    direct, _ = image_provider.render_reference_input_bytes(grid["collageItems"][0])
+    assert direct == out.getvalue()  # Neither cropping, padding nor re-encoding.
+    content, _ = image_provider.render_reference_input_bytes(grid)
+    board = Image.open(BytesIO(content))
+    assert board.size == (600, 472)  # Layout only; no extra square canvas.
+    assert board.getpixel((300, 80))[0] > 240
+    assert board.getpixel((300, 210))[2] > 240  # Lower body survives.

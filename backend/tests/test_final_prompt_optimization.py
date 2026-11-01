@@ -394,7 +394,7 @@ def test_optimizer_reads_actual_board_and_original_image_bytes(monkeypatch):
     output = BytesIO()
     Image.new('RGB', (40, 60), (200, 100, 30)).save(output, format='PNG')
     content = output.getvalue()
-    monkeypatch.setattr(image_provider, 'reference_source_bytes', lambda item, deadline=None: (content, 'image/png'))
+    monkeypatch.setattr(image_provider, 'reference_source_bytes', lambda item, deadline=None, **kwargs: (content, 'image/png'))
     source = {'role': 'hero_garment', 'objectKey': 'original.png'}
     assert main.vision_reference_input(source)['data'] == content
     assert main.vision_reference_input(source)['mime_type'] == 'image/png'
@@ -480,7 +480,7 @@ def test_optimizer_keeps_different_crops_distinct_and_reads_cropped_pixels(monke
     output = BytesIO()
     Image.new('RGB', (100, 200), 'red').save(output, 'PNG')
     from app import image_provider
-    monkeypatch.setattr(image_provider, 'reference_source_bytes', lambda *args: (output.getvalue(), 'image/png'))
+    monkeypatch.setattr(image_provider, 'reference_source_bytes', lambda *args, **kwargs: (output.getvalue(), 'image/png'))
     monkeypatch.setattr(main, 'vision_reference_input', REAL_VISION_REFERENCE_INPUT)
     packages = {str(i): {'prompt': 'pose', 'promptRuntime': {'shot_index': str(i)}, 'imageInputs': [
         {'role': 'shot_pose', 'objectKey': 'same.png', 'providerCrop': {'kind': 'keep_top_ratio', 'ratio': ratio}},
@@ -490,20 +490,27 @@ def test_optimizer_keeps_different_crops_distinct_and_reads_cropped_pixels(monke
     assert [Image.open(BytesIO(x['data'])).size for x in images] == [(100, 90), (100, 156)]
 
 
-def test_canvas_policy_frozen_for_new_sets_but_not_legacy(client, monkeypatch):
+def test_original_geometry_for_new_sets_preserves_legacy_crop_and_canvas(client, monkeypatch):
     from app.image_provider import SQUARE_WHITE_CANVAS
     from app.prompt_optimization import optimizer_reference_identity
     ids, result_set, image_ids = create_run(client)
     preparation = main.read_final_preparation(result_set)
-    assert preparation['referenceCanvas'] == SQUARE_WHITE_CANVAS
+    assert preparation['referenceGeometry'] == 'original_v1'
+    assert 'referenceCanvas' not in preparation
     monkeypatch.setattr(main, 'build_direct_final_image_inputs', lambda *args: [
         {'role': 'model_identity', 'collageItems': [{'objectKey': 'portrait.png'}]},
+        {'role': 'shot_pose', 'objectKey': 'pose.png'},
     ])
     package = main.build_new_final_task_package(ids['task_id'], image_ids[0])
+    assert 'providerCrop' not in package['imageInputs'][1]
+    assert package['referenceGeometry'] == 'original_v1'
     item = package['imageInputs'][0]
-    assert item['providerCanvas'] == item['collageItems'][0]['providerCanvas'] == SQUARE_WHITE_CANVAS
-    del preparation['referenceCanvas']
+    assert 'providerCanvas' not in item and 'providerCanvas' not in item['collageItems'][0]
+    preparation.pop('referenceGeometry')
+    preparation['referenceCanvas'] = SQUARE_WHITE_CANVAS
     main.save_final_preparation(result_set, preparation)
-    legacy = main.build_new_final_task_package(ids['task_id'], image_ids[0])['imageInputs'][0]
-    assert 'providerCanvas' not in legacy and 'providerCanvas' not in legacy['collageItems'][0]
+    legacy_package = main.build_new_final_task_package(ids['task_id'], image_ids[0])
+    assert legacy_package['imageInputs'][1]['providerCrop'] == {'kind': 'keep_top_ratio', 'ratio': .78}
+    legacy = legacy_package['imageInputs'][0]
+    assert legacy['providerCanvas'] == legacy['collageItems'][0]['providerCanvas'] == SQUARE_WHITE_CANVAS
     assert optimizer_reference_identity(item) != optimizer_reference_identity(legacy)

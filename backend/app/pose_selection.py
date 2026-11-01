@@ -91,9 +91,13 @@ def validate_pose_plan(value: Any, images_by_code: dict[str, set[int]]) -> list[
             raise ValueError("姿势定选必须来自当前可用姿势库")
         if type(image) is not int or image not in images_by_code.get(code, set()):
             raise ValueError("姿势定选图片不属于所选姿势")
-        reason, direction = shot.get("reason"), shot.get("direction")
-        if not isinstance(reason, str) or not reason.strip() or not isinstance(direction, str) or not direction.strip():
-            raise ValueError("姿势定选缺少选择理由或动作说明")
+        # Current selection returns identities and a reason only. Retain optional
+        # historical direction for display/audit, never invent action text here.
+        reason, direction = shot.get("reason"), shot.get("direction", "")
+        if not isinstance(reason, str) or not reason.strip():
+            raise ValueError("姿势定选缺少选择理由")
+        if not isinstance(direction, str):
+            raise ValueError("姿势定选的历史动作说明格式不正确")
         seen.add(index)
         result.append({"shotIndex": index, "poseCode": code, "imageId": image,
                        "reason": reason.strip(), "direction": direction.strip()})
