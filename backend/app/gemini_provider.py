@@ -26,6 +26,7 @@ import time
 from typing import Any, Callable
 
 from . import config
+from . import deepseek_inputs
 from .generation_progress import (
     ERROR_CONN_RESET,
     ERROR_INVALID_REQUEST,
@@ -366,6 +367,24 @@ def _generate_via_toapis(
     should_cancel: Callable[[], bool] | None = None,
 ) -> str:
     # 保留历史函数名；DeepSeek 官方与 ToAPIs 共用 OpenAI chat/SSE 和恢复契约。
+    if _is_deepseek_channel():
+        if len(images) > TOAPIS_MAX_MESSAGE_IMAGES:
+            raise GeminiProviderError("文本模型(DeepSeek 官方通道) 客户端单次请求最多 16 张图片", ERROR_INVALID_REQUEST)
+        if should_cancel and should_cancel():
+            raise RuntimeError("模型调用已取消")
+        try:
+            plan = deepseek_inputs.plan_request(prompt, images, system_instruction, effective_gemini_model())
+        except ValueError as exc:
+            raise GeminiProviderError(str(exc), ERROR_INVALID_REQUEST) from exc
+        logger.info("DeepSeek input transport: %s", json.dumps(plan.facts, ensure_ascii=False))
+
+        def prepare_request(deadline: float) -> None:
+            plan.resolve_files(lambda item: _upload_deepseek_file(item, deadline), should_cancel)
+
+        return _post_toapis_chat_with_retry(
+            plan.payload, on_retry=on_retry, initial_retry_count=initial_retry_count,
+            defer_retry=defer_retry, should_cancel=should_cancel, prepare_request=prepare_request,
+        )
     payload = build_toapis_chat_payload(prompt, images, system_instruction)
     return _post_toapis_chat_with_retry(
         payload,
@@ -382,6 +401,7 @@ def _post_toapis_chat_with_retry(
     on_retry: Callable[[dict[str, Any]], None] | None = None,
     initial_retry_count: int = 0,
     defer_retry: bool = False,
+    prepare_request: Callable[[float], None] | None = None,
 ) -> str:
     """对限流和连接类瞬时错误有限重发整个 chat completions 请求。
 
@@ -416,6 +436,10 @@ def _post_toapis_chat_with_retry(
                     raise RuntimeError("模型调用已取消")
                 if deadline is None:
                     deadline = time.monotonic() + time_budget
+                if prepare_request is not None:
+                    prepare_request(deadline)
+                    if should_cancel and should_cancel():
+                        raise RuntimeError("模型调用已取消")
                 remaining = deadline - time.monotonic()
                 if remaining <= 0:
                     raise GeminiProviderError(f"{_chat_label()} 限流重试已超过总时间预算", ERROR_RATE_LIMITED)
@@ -509,6 +533,54 @@ def build_toapis_chat_payload(
     }
 
 
+def _upload_deepseek_file(image: dict[str, Any], deadline: float) -> str:
+    """Temporary official-provider reference; retries/slots belong to the chat loop.
+
+    No local/S3 write and no permanent provider copy. Successful uploads are reused
+    during this invocation; after process restart the original frozen media is read.
+    """
+    import requests
+
+    settings = get_settings()
+    remaining = min(600.0, deadline - time.monotonic(), float(settings.deepseek_timeout_seconds))
+    if remaining <= 0:
+        raise GeminiProviderError("DeepSeek 参考图上传已超过总时间预算", ERROR_RATE_LIMITED)
+    try:
+        response = requests.post(
+            settings.deepseek_base_url.rstrip("/") + "/files",
+            headers={"Authorization": f"Bearer {settings.deepseek_api_key}"},
+            data={"purpose": "user_data", "expires_after[anchor]": "created_at",
+                  "expires_after[seconds]": str(deepseek_inputs.FILE_TTL_SECONDS)},
+            files={"file": (image["filename"], image["data"], image["mime_type"])},
+            timeout=(min(float(settings.deepseek_connect_timeout_seconds), remaining), remaining),
+        )
+    except requests.RequestException as exc:
+        raise GeminiProviderError(f"DeepSeek 参考图上传失败: {exc}", ERROR_CONN_RESET) from exc
+    with response:
+        try:
+            result = response.json()
+        except ValueError:
+            result = {}
+        if not isinstance(result, dict):
+            result = {}
+        if not response.ok:
+            raw = response.text or ""
+            error = normalize_toapis_error(result, status_code=response.status_code, fallback_message=raw)
+            if response.status_code in {400, 413, 422}:
+                error["code"] = ERROR_INVALID_REQUEST
+            raise GeminiProviderError(
+                f"DeepSeek 参考图上传失败: {summarize_upstream_http_error(response.status_code, raw)}",
+                str(error["code"]), retry_after=_parse_retry_after(response.headers.get("Retry-After")),
+                provider_response={"httpStatus": response.status_code, "providerError": error,
+                                   "phase": "file_upload"},
+            )
+        file_id = result.get("id")
+        if not isinstance(file_id, str) or not file_id.startswith("file-api-"):
+            raise GeminiProviderError("DeepSeek 文件上传未返回有效 file_id", ERROR_INVALID_REQUEST)
+        logger.info("DeepSeek temporary file: id=%s bytes=%s expires_at=%s", file_id, len(image["data"]), result.get("expires_at"))
+        return file_id
+
+
 def _post_toapis_chat(payload: dict[str, Any], *, read_timeout_seconds: float | None = None) -> str:
     """流式调用 ToAPIs 或 DeepSeek 官方 chat completions，保留历史函数名。
 
@@ -543,7 +615,7 @@ def _post_toapis_chat(payload: dict[str, Any], *, read_timeout_seconds: float | 
         configured_read_timeout = settings.deepseek_timeout_seconds
         configured_connect_timeout = settings.deepseek_connect_timeout_seconds
         if len(json.dumps(payload, allow_nan=False).encode("utf-8")) > DEEPSEEK_MAX_REQUEST_BYTES:
-            raise GeminiProviderError("DeepSeek 官方请求体超过 48 MiB，请减少或压缩参考图", ERROR_INVALID_REQUEST)
+            raise GeminiProviderError("DeepSeek 官方完整请求体超过 48 MiB（图片、文本与 JSON 合计）；未截断提示词", ERROR_INVALID_REQUEST)
     else:
         url = toapis_url("/v1/chat/completions")
         api_key = settings.toapis_api_key

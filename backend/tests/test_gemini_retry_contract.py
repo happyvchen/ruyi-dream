@@ -601,6 +601,7 @@ def test_gemini_rate_limit_retries_stop_before_exceeding_time_budget(
 def test_toapis_image_budget_checked_before_network(monkeypatch, count):
     from app.generation_progress import ERROR_INVALID_REQUEST
     calls = []
+    monkeypatch.setattr(gemini_provider, 'get_settings', lambda: SimpleNamespace(gemini_provider='toapis'))
     monkeypatch.setattr(gemini_provider, 'effective_gemini_model', lambda: 'test')
     monkeypatch.setattr(gemini_provider, '_post_toapis_chat_with_retry', lambda *args, **kwargs: calls.append(args) or '{}')
     images = [{'data': b'image', 'mime_type': 'image/png'}] * count

@@ -13,11 +13,28 @@
 
 文本与视觉理解继续复用 `app/gemini_provider.py` 和 `GEMINI_PROVIDER` 开关：`toapis` 使用 `GEMINI_TOAPIS_MODEL=deepseek-v4.1-flash` 与 `TOAPIS_API_KEY`；`deepseek` 直连官方，使用独立 `DEEPSEEK_API_KEY`、`DEEPSEEK_BASE_URL=https://api.deepseek.com`、`DEEPSEEK_MODEL=deepseek-flash`；`direct` 仍为 Gemini。代码缺省仍为 direct，示例配置仍为 toapis；不自动跨供应商回退，不改变 Image-2 配置。新调用记录保存实际模型来源、通道和模型 ID，历史记录不改写。
 
-两个 chat 通道保留现有 Base64 图片、SSE、16 张客户端上限、JSON 解析与重试契约。成片提示词整理按参考图并集计算预算，超过 16 张时按完整镜头分批，每批成功结果立即冻结，失败或取消后继续复用；姿势选搭对两个通道采用相同拼图预算。官方请求体超过 48 MiB 在发送前拒绝；不额外发送思考或 JSON 模式参数，使用模型默认值。DeepSeek 的 HTTP 400/422 按格式/参数错误硬停，401/402 不重试，429/5xx 沿用有限恢复；只有所选通道的密钥可用于请求。
+两个 chat 通道保留 SSE、16 张客户端上限、JSON 解析与重试契约。新结果集的成片提示词整理采用五姿势宫格、整组一次调用，历史结果集继续使用冻结的完整镜头分批协议；姿势选搭保持原拼图预算。仅 `GEMINI_PROVIDER=deepseek` 进入 `app/deepseek_inputs.py` 的官方传输规划，ToAPIs、Google 与最终生图输入处理不变。不额外发送思考、输出长度或 JSON 模式参数，使用模型默认值。DeepSeek 的 HTTP 400/422 按格式/参数错误硬停，401/402 不重试，429/5xx 沿用有限恢复；只有所选通道的密钥可用于请求。
+
+DeepSeek 官方限制与适配（2026-10-30）：
+
+| 限制 | 官方口径 | 本项目行为 |
+|---|---|---|
+| 完整 Chat JSON 请求体 | 48 MiB，含 Base64、system/user 文本与结构 | 全部图片统一通过 Files API 上传，Chat 只传文本及 `file_id`；按实际序列化字节计算，不截断文字、不删图、不拆五镜头 |
+| 单图原始编码字节 | inline/URL 32 MiB，file_id 64 MiB | 统一 file_id，不再保留 inline 分支；超过 64 MiB 明确报错，不静默降低画质 |
+| 全部图片字节 | 无 file_id 64 MiB，包含 file_id 200 MiB | 统一文件引用，独立校验合计；超过 200 MiB 明确报错 |
+| 图片数量 | 600 张 | 保留现有业务 16 张预算，不借此次修改扩张业务输入 |
+| 单边尺寸 | 8192px；15 张及以上为 4096px | 合规图原字节不变；超限才 EXIF 校正、等比缩至上限并无损 PNG 编码，不增加裁切；超限动画拒绝，避免丢帧 |
+| 格式/角色/模型 | JPEG、PNG、GIF、WebP；user 图片；Flash 支持视觉 | 按文件内容检查、纠正 MIME；附件顺序不变，file_id 不设置 detail，不使用 low；已知 Pro 图像请求本地拒绝 |
+| 外部 URL | 最多 8192 字符、下载 60 秒以内、单图 32 MiB | 当前官方通道不使用外部 URL，不把私有 S3 暴露给上游 |
+| 上下文/输出 | Flash 1M 上下文；输出最大 384K（393216）；输入、图像 token 与输出共同占上下文 | 不用字符数冒充 token 预算，不裁短 Prompt；精确上下文校验由上游执行，参数失败硬停。沿用默认输出额度：非思考 8K、思考 64K、max effort 128K |
+
+每张图的模型内预处理约有 1024 image tokens 上限，官方会自动缩放；客户端不额外把合规图缩到 512 或 1300px。使用 Files API 也不代表服务端跳过自己的视觉预处理。
+
+Files API 是临时 provider 输入，不是第二套业务存储：所有图片均上传已冻结素材渲染得到的字节；纯文本调用不上传文件，不修改 S3 原件、选姿、提示词、结果集或已发布图片。上传使用 `purpose=user_data`、短 ASCII 文件名与 24 小时自动过期（官方允许 1 小时至 30 天；每账号 25 GiB / 10000 文件）；不永久留存或维护新的本地缓存表。上传沿用官方通道并发槽、超时及同一有限恢复预算，单次超时不超过官方 10 分钟上传窗口；成功 file_id 在本次调用内复用，上传后和提交前检查取消。重启或持久化延期后从冻结原图重新准备，过期 ID 不写进业务快照。日志记录图片大小、尺寸、传输方式和临时 ID，上传 HTTP 413 也归为参数错误。账号存储额度由上游校验，不通过额外列表请求预占额度。
 
 官方通道的连接/发送超时 `DEEPSEEK_CONNECT_TIMEOUT_SECONDS=60`、读取超时 `DEEPSEEK_TIMEOUT_SECONDS=300`、并发 `DEEPSEEK_MAX_CONCURRENCY=5` 独立配置，使用独立请求闸门；两个 chat 通道共用现有文本线程池与 `GEMINI_RETRY_*`、持久化退避和取消边界。ToAPIs 原全局闸门及图片调用保持原行为。
 
-官方协议核对（2026-10-29）：[首次调用与模型名](https://api-docs.deepseek.com/)、[图片输入与限制](https://api-docs.deepseek.com/guides/vision/)、[Chat Completions](https://api-docs.deepseek.com/api/create-chat-completion/)、[错误码](https://api-docs.deepseek.com/quick_start/error_codes/)。`deepseek-flash` 当前对应 DeepSeek-V4.1-Flash-1017，支持图片输入；此处保留客户端 16 张预算，未扩大到官方上限。
+官方协议核对（2026-10-30）：[首次调用与模型名](https://api-docs.deepseek.com/)、[图片输入与限制](https://api-docs.deepseek.com/guides/vision/)、[Files API](https://api-docs.deepseek.com/guides/files_api/)、[Chat Completions](https://api-docs.deepseek.com/api/create-chat-completion/)、[上下文与输出](https://api-docs.deepseek.com/quick_start/pricing/)、[并发和保活](https://api-docs.deepseek.com/quick_start/rate_limit/)、[错误码](https://api-docs.deepseek.com/quick_start/error_codes/)。`deepseek-flash` 当前对应 DeepSeek-V4.1-Flash-1017；官方账号并发上限为 Flash 2500 / Pro 500，本项目继续使用独立配置默认 5，不自动扩大并发。SSE keep-alive 不计入正文，既有解析与取消恢复保持原行为。
 
 AI 选搭的模型输出只含 `selected_files` 和最终方案业务字段，不要求 `schema_version` 或旧候选编号。后端按业务结构校验并补内部历史兼容标记，原始返回保留。选搭每次业务重问前及返回后检查任务/attempt 取消状态，取消后不再发起下一轮契约重问。
 
@@ -96,6 +113,7 @@ Gemini 对明确限流（HTTP 429 或 `rate_limit_check_failed`）、连接失�
 | `app/db.py` | 最终 schema、Prompt 配置槽登记、清理迁移 |
 | `app/prompt_render.py` | 动态占位文本和参考图图号区间渲染 |
 | `app/image_provider.py` | ToApis / fal 请求快照和图片生成适配 |
+| `app/deepseek_inputs.py` | 仅 DeepSeek 官方的图片格式/尺寸/字节预算与无损文件引用规划 |
 | `app/media_storage.py` | 媒体对象键、兼容读取边界和单资产精确清理清单 |
 | `app/toapis_concurrency.py` | ToAPIs 全局并发闸门 |
 | `app/generation_progress.py` | attempt 阶段进度和错误分类 |

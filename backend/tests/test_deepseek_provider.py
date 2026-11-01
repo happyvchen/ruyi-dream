@@ -3,11 +3,14 @@ from __future__ import annotations
 import asyncio
 import json
 from contextlib import contextmanager
+from io import BytesIO
+import random
 
 import pytest
 import requests
+from PIL import Image
 
-from app import config, gemini_provider as provider
+from app import config, deepseek_inputs, gemini_provider as provider
 from app.generation_progress import (
     ERROR_AUTH_FAILED, ERROR_INSUFFICIENT_BALANCE, ERROR_INVALID_REQUEST,
     ERROR_MALFORMED_OUTPUT,
@@ -66,6 +69,13 @@ def call(**kwargs):
     return asyncio.run(provider.generate_gemini_json_text('Return JSON', **kwargs))
 
 
+def image_input(size=(40, 40), fmt='PNG'):
+    image = Image.frombytes('RGB', size, random.Random(42).randbytes(size[0] * size[1] * 3))
+    output = BytesIO()
+    image.save(output, fmt)
+    return {'data': output.getvalue(), 'mime_type': 'intentionally/wrong'}
+
+
 @pytest.mark.parametrize('base_url', ['https://api.deepseek.com', 'https://api.deepseek.com/v1/'])
 def test_official_multimodal_stream_and_attribution(settings, monkeypatch, base_url):
     settings.deepseek_base_url = base_url
@@ -75,10 +85,20 @@ def test_official_multimodal_stream_and_attribution(settings, monkeypatch, base_
         {'choices': [{'delta': {}, 'finish_reason': 'stop'}], 'usage': {'completion_tokens': 20}},
     ])
     calls = []
-    monkeypatch.setattr(requests, 'post', lambda url, **kw: calls.append((url, kw)) or response)
-    result = call(images=[{'data': b'image', 'mime_type': 'image/png'}], system_instruction='System rules')
+
+    def post(url, **kw):
+        calls.append((url, kw))
+        return Response(payload={'id': 'file-api-test'}) if url.endswith('/files') else response
+
+    monkeypatch.setattr(requests, 'post', post)
+    original = image_input()
+    result = call(images=[original], system_instruction='System rules')
     assert json.loads(result) == {'结果': '成功'}
-    url, request = calls[0]
+    assert len(calls) == 2
+    upload_url, upload_request = calls[0]
+    assert upload_url == base_url.rstrip('/') + '/files'
+    assert upload_request['files']['file'][1:] == (original['data'], 'image/png')
+    url, request = calls[1]
     assert url == base_url.rstrip('/') + '/chat/completions'
     assert request['headers']['Authorization'] == 'Bearer official-test-key'
     assert request['timeout'] == (20, 120)
@@ -86,7 +106,7 @@ def test_official_multimodal_stream_and_attribution(settings, monkeypatch, base_
     payload = request['json']
     assert payload['model'] == 'deepseek-flash'
     assert payload['messages'][0] == {'role': 'system', 'content': 'System rules'}
-    assert payload['messages'][1]['content'][1]['image_url']['url'] == 'data:image/png;base64,aW1hZ2U='
+    assert payload['messages'][1]['content'][1] == {'type': 'file', 'file_id': 'file-api-test'}
     assert payload['stream_options'] == {'include_usage': True}
     assert response.closed
     assert provider.gemini_request_meta() == {
@@ -217,3 +237,137 @@ def test_official_concurrency_slot_released_on_failure(settings):
     assert not semaphore.acquire(blocking=False)
     semaphore.release()
     semaphore.release()
+
+
+def test_all_images_use_files_without_altering_text_pixels_or_order(settings, monkeypatch):
+    monkeypatch.setattr(deepseek_inputs, 'MAX_BODY_BYTES', 10000)
+    prompt, system = '保留原文\n' * 30, '完整系统规则  '
+    images = [image_input(), image_input((50, 50))]
+    plan = deepseek_inputs.plan_request(prompt, images, system, 'deepseek-flash')
+    assert list(plan.uploads) == [0, 1]
+    uploaded = []
+    plan.resolve_files(lambda item: uploaded.append(item) or f'file-api-{len(uploaded)}')
+    assert [item['data'] for item in uploaded] == [image['data'] for image in images]
+    assert deepseek_inputs.body_size(plan.payload) <= 10000
+    assert plan.payload['messages'][0]['content'] == system
+    content = plan.payload['messages'][1]['content']
+    assert content[0]['text'] == prompt
+    assert content[1:] == [{'type': 'file', 'file_id': 'file-api-1'}, {'type': 'file', 'file_id': 'file-api-2'}]
+    assert not any(f['resized'] for f in plan.facts)
+
+
+@pytest.mark.parametrize('fmt,mime', [('PNG', 'image/png'), ('JPEG', 'image/jpeg'), ('WEBP', 'image/webp'), ('GIF', 'image/gif')])
+def test_supported_format_detected_without_reencoding(settings, fmt, mime):
+    original = image_input(fmt=fmt)
+    plan = deepseek_inputs.plan_request('text', [original], None, 'deepseek-flash')
+    assert plan.uploads[0]['mime_type'] == mime
+    assert plan.uploads[0]['data'] == original['data']
+
+
+@pytest.mark.parametrize('count,expected', [(14, (64, 32)), (15, (32, 16)), (16, (32, 16))])
+def test_dimension_rule_changes_at_fifteen_images(settings, monkeypatch, count, expected):
+    monkeypatch.setattr(deepseek_inputs, 'MAX_EDGE', 64)
+    monkeypatch.setattr(deepseek_inputs, 'MANY_IMAGE_MAX_EDGE', 32)
+    original = image_input((64, 32))
+    plan = deepseek_inputs.plan_request('text', [original] * count, None, 'deepseek-flash')
+    for fact in plan.facts:
+        assert fact['dimensions'] == expected
+        assert fact['resized'] == (count >= 15)
+    with Image.open(BytesIO(plan.uploads[0]['data'])) as decoded:
+        assert decoded.size == expected
+        assert decoded.format == 'PNG'
+
+
+def test_single_and_total_byte_limits_independent_of_body(settings, monkeypatch):
+    image = image_input()
+    n = len(image['data'])
+    monkeypatch.setattr(deepseek_inputs, 'MAX_FILE_BYTES', n)
+    assert list(deepseek_inputs.plan_request('text', [image], None, 'deepseek-flash').uploads) == [0]
+    monkeypatch.setattr(deepseek_inputs, 'MAX_TOTAL_BYTES', n * 2)
+    assert len(deepseek_inputs.plan_request('text', [image] * 2, None, 'deepseek-flash').uploads) == 2
+    monkeypatch.setattr(deepseek_inputs, 'MAX_TOTAL_BYTES', n)
+    with pytest.raises(ValueError, match='200 MiB'):
+        deepseek_inputs.plan_request('text', [image] * 2, None, 'deepseek-flash')
+    monkeypatch.setattr(deepseek_inputs, 'MAX_FILE_BYTES', n - 1)
+    with pytest.raises(ValueError, match='单图 64 MiB'):
+        deepseek_inputs.plan_request('text', [image], None, 'deepseek-flash')
+
+
+def test_invalid_format_model_and_oversized_text_fail_before_upload(settings, monkeypatch):
+    with pytest.raises(provider.GeminiProviderError, match='格式'):
+        call(images=[image_input(fmt='BMP')])
+    with pytest.raises(provider.GeminiProviderError, match='解码'):
+        call(images=[{'data': b'broken'}])
+    settings.deepseek_model = 'deepseek-v4-pro'
+    with pytest.raises(provider.GeminiProviderError, match='deepseek-flash'):
+        call(images=[image_input()])
+    settings.deepseek_model = 'deepseek-flash'
+    monkeypatch.setattr(deepseek_inputs, 'MAX_BODY_BYTES', 1)
+    with pytest.raises(provider.GeminiProviderError, match='未截断提示词'):
+        call(images=[image_input()])
+
+
+def test_file_uploads_reused_after_upload_failure_and_chat_retry(settings, monkeypatch):
+    images = [image_input(), image_input((50, 50))]
+    uploads, chats, waits = [], [], []
+    monkeypatch.setattr(provider.time, 'sleep', waits.append)
+
+    def post(url, **kw):
+        assert kw['headers']['Authorization'] == 'Bearer official-test-key'
+        if url.endswith('/files'):
+            uploads.append(kw)
+            assert kw['data'] == {'purpose': 'user_data', 'expires_after[anchor]': 'created_at',
+                                  'expires_after[seconds]': '86400'}
+            if len(uploads) == 2:
+                return Response(429, {'error': {'message': 'busy'}})
+            return Response(payload={'id': f'file-api-{len(uploads)}'})
+        chats.append(kw['json'])
+        if len(chats) == 1:
+            return Response(503, {'error': {'message': 'busy'}})
+        return Response(payload={'choices': [{'message': {'content': '{}'}}]})
+
+    monkeypatch.setattr(requests, 'post', post)
+    assert call(images=images) == '{}'
+    assert len(uploads) == 3 and len(chats) == 2
+    assert uploads[0]['files']['file'][1] == images[0]['data']
+    assert uploads[1]['files']['file'][1] == uploads[2]['files']['file'][1] == images[1]['data']
+    assert chats[-1]['messages'][0]['content'][1:] == [
+        {'type': 'file', 'file_id': 'file-api-1'}, {'type': 'file', 'file_id': 'file-api-3'}]
+    assert waits == [1, 2]  # shared budget, no nested retry loop
+
+
+def test_cancel_after_upload_prevents_next_upload_and_chat(settings, monkeypatch):
+    cancelled, calls = False, []
+
+    def post(url, **kw):
+        nonlocal cancelled
+        calls.append(url)
+        cancelled = True
+        return Response(payload={'id': 'file-api-test'})
+
+    monkeypatch.setattr(requests, 'post', post)
+    with pytest.raises(RuntimeError, match='取消'):
+        call(images=[image_input()] * 2, should_cancel=lambda: cancelled)
+    assert calls == ['https://api.deepseek.com/files']
+
+
+@pytest.mark.parametrize('status,code', [(400, ERROR_INVALID_REQUEST), (401, ERROR_AUTH_FAILED),
+    (402, ERROR_INSUFFICIENT_BALANCE), (413, ERROR_INVALID_REQUEST), (422, ERROR_INVALID_REQUEST)])
+def test_upload_terminal_errors_do_not_submit_chat(settings, monkeypatch, status, code):
+    calls = []
+    monkeypatch.setattr(requests, 'post', lambda url, **kw: calls.append(url) or Response(status, {'error': {'message': 'rejected'}}))
+    with pytest.raises(provider.GeminiProviderError) as error:
+        call(images=[image_input()])
+    assert error.value.error_code == code
+    assert calls == ['https://api.deepseek.com/files']
+
+
+def test_toapis_never_uses_official_input_policy(settings, monkeypatch):
+    from app import image_provider
+    settings.gemini_provider = 'toapis'
+    monkeypatch.setattr(image_provider, 'get_settings', lambda: settings)
+    monkeypatch.setattr(deepseek_inputs, 'plan_request', lambda *a: pytest.fail('DeepSeek policy leaked'))
+    monkeypatch.setattr(provider, '_post_toapis_chat_with_retry', lambda payload, **kw: json.dumps(payload))
+    payload = json.loads(call(images=[{'data': b'original', 'mime_type': 'image/webp'}]))
+    assert payload['messages'][0]['content'][1] == {
+        'type': 'image_url', 'image_url': {'url': 'data:image/webp;base64,b3JpZ2luYWw='}}
