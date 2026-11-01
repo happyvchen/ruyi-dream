@@ -170,6 +170,8 @@ def test_continue_delivery_failure_preserves_provider_attempt_for_redelivery(cli
             (failed_image_id, ERROR_DELIVERY_FAILED, timestamp, timestamp, timestamp, timestamp),
         )
         attempt_id = int(cursor.lastrowid)
+        db.execute('UPDATE generation_attempts SET response_snapshot_json=? WHERE id=?',
+                   (dumps({'provider': 'toapis', 'status': 'SUCCEEDED'}), attempt_id))
         if provider == "apiyi":
             db.execute("UPDATE generation_attempts SET provider_request_id = NULL, response_snapshot_json = ? WHERE id = ?", (
                 dumps({"provider": "apiyi", "status": "SUCCEEDED", "providerStatusResponse": {"data": [{"b64_json": "cGFpZA=="}]}}),
@@ -197,7 +199,13 @@ def test_continue_delivery_failure_preserves_provider_attempt_for_redelivery(cli
             (failed_image_id,),
         ).fetchone()
     assert image["status"] == "QUEUED"
-    assert image["active_attempt_id"] == attempt_id
+    assert image["active_attempt_id"] != attempt_id
+    with get_db() as db:
+        resumed = db.execute('SELECT * FROM generation_attempts WHERE id=?', (image['active_attempt_id'],)).fetchone()
+        previous = db.execute('SELECT * FROM generation_attempts WHERE id=?', (attempt_id,)).fetchone()
+    assert resumed['retry_of_attempt_id'] == attempt_id
+    assert resumed['provider_request_id'] == previous['provider_request_id']
+    assert previous['status'] == 'FAILED'
 
 
 def test_upload_failure_is_persisted_for_poller_and_restores_stage(client) -> None:

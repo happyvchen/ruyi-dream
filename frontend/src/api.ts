@@ -375,6 +375,7 @@ export type GenerationTask = {
       userInstruction?: Record<string, unknown>
       asset?: MediaAsset | null
       versions?: { id: number | null; asset?: MediaAsset | null; createdAt?: string; isCurrent: boolean; canRegenerate: boolean }[]
+      recoveryRequiresRegeneration?: boolean
       activeAttemptId?: number | null
       activeAttempt?: AIOperation | null
       createdAt?: string
@@ -1124,8 +1125,8 @@ export const api = {
     request<{ item: GenerationTask }>(`/api/generation-tasks/${id}/auto-run-final`, { method: 'POST', body: JSON.stringify({ restart }) }),
   cancelAutoRun: (id: number) =>
     request<{ item: GenerationTask }>(`/api/generation-tasks/${id}/cancel-auto-run`, { method: 'POST' }),
-  retryResultImage: (id: number, userInstruction?: string, versionId?: number) =>
-    request<{ item: GenerationTask }>(`/api/generation-result-images-new/${id}/retry`, { method: 'POST', body: JSON.stringify({ userInstruction, versionId }) }),
+  retryResultImage: (id: number, userInstruction?: string, versionId?: number, forceRegenerate = false) =>
+    request<{ item: GenerationTask }>(`/api/generation-result-images-new/${id}/retry`, { method: 'POST', body: JSON.stringify({ userInstruction, versionId, forceRegenerate }) }),
   regenerateResultSet: (id: number) =>
     request<{ item: GenerationTask }>(`/api/generation-result-sets/${id}/regenerate`, { method: 'POST' }),
   continueResultSet: (id: number) =>

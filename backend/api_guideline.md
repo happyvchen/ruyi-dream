@@ -273,3 +273,11 @@ user 的 generation 系列 JSON 响应不含 poseSelection 参考图、姿势要
 姿势选搭的 Prompt 预览使用与执行一致的章节渲染：`runtime.pose_shots` 只包含对应品类成片 Prompt 中五个镜头各自的「机位&景别」，历史上下文使用当时 runtime 事实并应用当前配置。预览诊断复用 `missingPlaceholders` 返回章节缺失、重复、镜头正文缺失等配置错误；实际选姿势在创建 attempt 和调用模型之前返回 409。选择历史记录不会改写 `historicalPrompt` 或历史快照。
 
 新优化调用/草稿预览的 `modelBatches` 通常仅一项，五镜头共用一张姿势参考板。用户消息 `shots[].references[].index` 为最终生图局部图号，`visionImageIndex` 为优化附件编号，姿势引用增加 `cell`；`imageManifest` 的姿势板含 `referenceBoardKind=optimizer_pose_grid`、3列2行、cells 与 emptyCells。实际生图请求图片列表不变。历史多批记录仍完整返回；只剩部分待处理镜头时单次调用显示实际镜头数。
+
+### 成片恢复优先重试
+
+`POST /api/generation-result-images-new/{id}/retry` 对 FAILED 镜头且未传 `userInstruction`、`versionId`、`forceRegenerate=true` 时恢复原请求。有结果则回传/登记，仍运行则续查；确认 task_not_found、可重试的上游生成失败或已过期且不可获取的结果后，最多补提一次。网络/鉴权/普通 404 页面不触发重生。显式调整要求、选择版本、`forceRegenerate=true` 或成功镜头维持原重新生成语义。
+
+结果图增加业务字段 `recoveryRequiresRegeneration`：提交未知且无可查询记录时为 true，默认 retry 返回 409，用户可显式重新生成。`continue` 使用相同恢复策略，跳过这类无法核实的镜头、保留部分失败状态，其他未完成镜头继续。`redeliver` 始终只恢复，绝不提交新的图片生成请求。
+
+恢复创建新 attempt 并关联 `retry_of_attempt_id`，复用原 request/response 快照；恢复决策及一次补提预算保存在 response 的 `recovery` 中。ToAPIs `clientBusinessId` 在网络提交前持久化；平台返回的 ID 随响应立即落库。新快照的 `providerScope` 保存端点和密钥摘要（不保存密钥），查询使用原平台，连接范围变化则停止查询。历史只有 HTTP trace ID 的同步请求不能按异步任务查询。

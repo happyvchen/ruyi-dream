@@ -20,7 +20,7 @@ import time
 import zipfile
 from uuid import uuid4
 from typing import Any, Literal
-from urllib.parse import quote, urlencode
+from urllib.parse import quote, urlencode, urlparse
 
 from fastapi import BackgroundTasks, Depends, FastAPI, File, Form, HTTPException, Query, Request, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
@@ -455,6 +455,7 @@ class GenerationStageInstructionRequest(BaseModel):
 
 class ResultImageRetryRequest(GenerationStageInstructionRequest):
     versionId: int | None = None
+    forceRegenerate: bool = False
 
 
 class AutoRunFinalRequest(BaseModel):
@@ -5491,6 +5492,7 @@ async def run_generate_final_images(
             styling_id,
             preview_id,
             user_instruction_context,
+            automatic_retry=trigger == "auto_run" and int(task["auto_run_retry_count"] or 0) > 0,
         )
         if image_ids is not None:
             if image_ids:
@@ -5603,17 +5605,13 @@ def continue_active_final_result_set(
     preview_id: int | None,
     user_instruction_context: dict[str, Any] | None = None,
     activate: bool = False,
+    automatic_retry: bool = False,
 ) -> list[int] | None:
     timestamp = now_iso()
     with get_db() as db:
         db.execute('BEGIN IMMEDIATE')
         if activate:
             assert_task_can_generate(db, task_id)
-        retry_task = db.execute(
-            "SELECT auto_run_retry_count FROM generation_tasks WHERE id = ?",
-            (task_id,),
-        ).fetchone()
-        automatic_retry = bool(retry_task and int(row_value(retry_task, "auto_run_retry_count", 0) or 0) > 0)
         result_set = db.execute(
             """
             SELECT * FROM generation_result_sets
@@ -5645,26 +5643,27 @@ def continue_active_final_result_set(
             if existing and existing["status"] in {"QUEUED", "RUNNING"}:
                 raise HTTPException(status_code=409, detail="成片已在生成中，请勿重复提交")
             if existing:
+                attempt = db.execute(
+                    "SELECT * FROM generation_attempts WHERE id = ?",
+                    (row_value(existing, "active_attempt_id"),),
+                ).fetchone()
                 package = replay_package(db, existing)
                 if package:
                     db.execute('UPDATE generation_result_images_new SET execution_snapshot_json=? WHERE id=?', (dumps(compact_package(package)), existing['id']))
-                elif published_versions(db, existing):
+                elif published_versions(db, existing) and not provider_resume_snapshot(attempt):
                     raise HTTPException(409, '该镜头的拍摄输入记录不完整，请使用重新一键成片；原图仍可查看和下载')
-                attempt = db.execute(
-                    "SELECT error_code, provider_request_id, response_snapshot_json FROM generation_attempts WHERE id = ?",
-                    (row_value(existing, "active_attempt_id"),),
-                ).fetchone()
                 if automatic_retry and existing["status"] == "FAILED":
                     if not attempt or not is_auto_run_retryable_error(attempt["error_code"]):
                         continue
-                preserve_provider_attempt = bool(
-                    attempt
-                    and (attempt["provider_request_id"] or resumable_sync_image_response(loads(attempt["response_snapshot_json"], {})))
-                    and (
-                        attempt["error_code"] == ERROR_DELIVERY_FAILED
-                        or is_status_check_retryable_error(attempt["error_code"])
-                    )
-                )
+                resume_id = None
+                if existing['status'] == 'FAILED' and attempt:
+                    if recovery_requires_regeneration(attempt):
+                        # Other missing shots can continue; an untraceable submission
+                        # requires the explicit per-shot regeneration action.
+                        continue
+                    if provider_resume_snapshot(attempt):
+                        resume_id = (attempt['id'] if automatic_retry else
+                                     create_image_recovery_attempt(db, attempt, allow_regenerate=True))
                 db.execute(
                     """
                     UPDATE generation_result_images_new
@@ -5679,7 +5678,7 @@ def continue_active_final_result_set(
                     """,
                     (
                         shot_role,
-                        row_value(existing, "active_attempt_id") if preserve_provider_attempt else None,
+                        resume_id,
                         existing["user_instruction_json"],
                         timestamp,
                         int(existing["id"]),
@@ -6049,6 +6048,20 @@ async def retry_new_result_image(image_id: int, request: Request, payload: Resul
         captured_task = dict(assert_task_can_generate(db, row['task_id']))
         if row['status'] in {'RUNNING', 'QUEUED'}:
             raise HTTPException(409, "当前结果图仍在生成中")
+        previous = db.execute('SELECT * FROM generation_attempts WHERE id=?', (row['active_attempt_id'],)).fetchone()
+    # A failed shot retries its original request. Choosing a published version,
+    # changing requirements or explicitly regenerating is a new creative request.
+    recover = row['status'] == 'FAILED' and not (payload and (
+        payload.forceRegenerate or payload.versionId is not None or payload.userInstruction is not None))
+    if recover and previous:
+        if recovery_requires_regeneration(previous):
+            raise HTTPException(409, '无法确认原任务且没有可查询的记录，请使用“重新生成”；这可能产生新的生成费用。')
+        if provider_resume_snapshot(previous):
+            task_id, result_set_id, attempt_id = queue_result_image_redelivery(image_id, allow_regenerate=True)
+            schedule_background_generation(run_final_generation(task_id, result_set_id, [image_id],
+                resume_attempts_by_image_id={image_id: attempt_id}, trigger='manual_recover'),
+                job_key=final_set_job_key(result_set_id))
+            return {'item': get_generation_task_by_id(task_id, include_debug=admin_debug_for_request(request))}
     package = shot_replay_package(row['task_id'], image_id, payload.versionId if payload else None,
                                   payload.userInstruction if payload else None)
     package['invocation'] = {'mode': 'manual_retry', 'target': 'final_image'}
@@ -6095,7 +6108,7 @@ async def redeliver_new_result_image(image_id: int, request: Request) -> dict[st
     return {"item": get_generation_task_by_id(task_id, include_debug=admin_debug_for_request(request))}
 
 
-def queue_result_image_redelivery(image_id: int) -> tuple[int, int, int]:
+def queue_result_image_redelivery(image_id: int, *, allow_regenerate: bool = False) -> tuple[int, int, int]:
     """校验并把回传失败的成片重新排队；返回 (task_id, result_set_id, attempt_id)。"""
     with get_db() as db:
         row = db.execute(
@@ -6132,30 +6145,8 @@ def queue_result_image_redelivery(image_id: int) -> tuple[int, int, int]:
         current = db.execute('SELECT active_attempt_id,status FROM generation_result_images_new WHERE id=?', (image_id,)).fetchone()
         if not current or current['active_attempt_id'] != row['active_attempt_id'] or current['status'] != 'FAILED':
             raise HTTPException(409, '镜头已变化，请刷新后重试')
-        attempt_id = create_attempt('generation_result_image', image_id, str(last_attempt['provider']),
-                                    request_snapshot=loads(last_attempt['request_snapshot_json'], {}), db=db)
+        attempt_id = create_image_recovery_attempt(db, last_attempt, allow_regenerate=allow_regenerate)
         activate_result_context(db, result_set_id)
-        request_snapshot = loads(last_attempt["request_snapshot_json"], {})
-        if isinstance(request_snapshot, dict):
-            request_snapshot = {**request_snapshot, "invocation": {"mode": "manual_redeliver", "target": "final_image"}}
-        db.execute(
-            """
-            UPDATE generation_attempts
-            SET provider_request_id = ?, response_snapshot_json = ?, retry_of_attempt_id = ?, updated_at = ?
-            WHERE id = ?
-            """,
-            (
-                last_attempt["provider_request_id"],
-                last_attempt["response_snapshot_json"],
-                int(last_attempt["id"]),
-                timestamp,
-                attempt_id,
-            ),
-        )
-        db.execute(
-            "UPDATE generation_attempts SET request_snapshot_json = ? WHERE id = ?",
-            (dumps(request_snapshot), attempt_id),
-        )
         db.execute(
             """
             UPDATE generation_result_images_new
@@ -9781,6 +9772,12 @@ def prepare_attempt_provider_resubmission(
     if not attempt_id:
         return
     timestamp = now_iso()
+    snapshot = dict(snapshot)
+    if snapshot.get('status') != 'SUBMISSION_RETRY_WAIT':
+        # Clear the previous generation's live lookup facts. A crash in this
+        # gap must never resurrect its already-terminal task or result.
+        for key in ('clientBusinessId', 'providerRequest', 'providerUrls', 'outputPath', 'providerStatusResponse'):
+            snapshot.pop(key, None)
     with get_db() as db:
         db.execute(
             """
@@ -9807,26 +9804,62 @@ def resumable_sync_image_response(snapshot: Any) -> bool:
     ))
 
 
+def provider_resume_snapshot(row: Any) -> dict[str, Any] | None:
+    """Use durable evidence only; HTTP trace IDs are not generation task IDs."""
+    if not row:
+        return None
+    snapshot = json_object(row['response_snapshot_json'])
+    if snapshot.get('outputPath') or resumable_sync_image_response(snapshot):
+        return {**snapshot, 'status': 'SUCCEEDED'}
+    request_id = row['provider_request_id'] or snapshot.get('providerRequestId')
+    if request_id and snapshot.get('provider') != 'apiyi':
+        return {**snapshot, 'providerRequestId': str(request_id)}
+    request = snapshot.get('providerRequest') if isinstance(snapshot.get('providerRequest'), dict) else {}
+    business_id = snapshot.get('clientBusinessId') or request.get('client_business_id')
+    if snapshot.get('provider') == 'toapis' and business_id:
+        return {**snapshot, 'providerRequestId': business_id, 'clientBusinessId': business_id,
+                'status': 'SUBMITTED'}
+    return None
+
+
+def recovery_requires_regeneration(row: Any) -> bool:
+    if not row:
+        return False
+    resume = provider_resume_snapshot(row)
+    if resume:
+        return not resume.get('outputPath') and recorded_image_provider(resume) is None
+    snapshot = json_object(row['response_snapshot_json'])
+    progress = json_object(row['progress_json'])
+    return (row['error_code'] == ERROR_SUBMISSION_UNKNOWN
+            or snapshot.get('status') in {'SUBMITTING', 'SUBMISSION_UNKNOWN', 'SUBMISSION_RETRY_WAIT'}
+            or progress.get('current') == PHASE_SUBMIT)
+
+
+def create_image_recovery_attempt(db: Any, previous: Any, *, allow_regenerate: bool) -> int:
+    snapshot = provider_resume_snapshot(previous)
+    if snapshot is None:
+        raise HTTPException(409, '没有可恢复的原任务记录，请使用重新生成')
+    snapshot = {**snapshot, 'recovery': {'sourceAttemptId': previous['id'],
+                'allowRegenerate': allow_regenerate, 'fallbackUsed': False}}
+    # Recheck upstream failures; a local failure is not proof that no image exists.
+    if snapshot.get('status') != 'SUCCEEDED':
+        snapshot['status'] = 'SUBMITTED'
+    package = json_object(previous['request_snapshot_json'])
+    package['invocation'] = {'mode': 'manual_recover' if allow_regenerate else 'manual_redeliver',
+                             'target': 'final_image'}
+    attempt_id = create_attempt('generation_result_image', previous['owner_id'], previous['provider'],
+                                request_snapshot=package, db=db)
+    db.execute("""UPDATE generation_attempts SET provider_request_id=?, response_snapshot_json=?,
+        retry_of_attempt_id=? WHERE id=?""", (snapshot.get('providerRequestId'), dumps(snapshot), previous['id'], attempt_id))
+    return attempt_id
+
+
 def get_attempt_provider_resume_snapshot(attempt_id: int | None) -> dict[str, Any] | None:
     if not attempt_id:
         return None
     with get_db() as db:
-        row = db.execute(
-            "SELECT provider_request_id, response_snapshot_json FROM generation_attempts WHERE id = ?",
-            (attempt_id,),
-        ).fetchone()
-    if not row:
-        return None
-    snapshot = loads(row["response_snapshot_json"], {})
-    if not isinstance(snapshot, dict):
-        snapshot = {}
-    if not row["provider_request_id"]:
-        # 同步 API易没有 task ID；已收到的图片必须只恢复交付，不能再次计费生成。
-        if resumable_sync_image_response(snapshot):
-            return snapshot
-        return None
-    snapshot["providerRequestId"] = row["provider_request_id"]
-    return snapshot
+        row = db.execute('SELECT * FROM generation_attempts WHERE id=?', (attempt_id,)).fetchone()
+    return provider_resume_snapshot(row)
 
 
 def get_attempt_response_snapshot(attempt_id: int | None) -> dict[str, Any]:
@@ -12550,6 +12583,17 @@ async def _generate_image_asset_unlocked(
     if payload and payload.get("providerRequestId") and str(payload["providerRequestId"]) not in provider_request_history:
         provider_request_history.append(str(payload["providerRequestId"]))
     submit_task_package = dict(task_package)
+    recovery = dict(payload.get('recovery') or {}) if payload else {}
+    submission_snapshot: dict[str, Any] = {}
+
+    def recover_by_regenerating(reason: str) -> bool:
+        if not recovery.get('allowRegenerate') or recovery.get('fallbackUsed'):
+            return False
+        ensure_active()
+        if not executable_package(task_package):
+            raise ImageProviderError('原拍摄输入不完整，无法重新生成', payload, error_code=ERROR_SYSTEM_ERROR)
+        recovery.update(fallbackUsed=True, reason=reason)
+        return True
 
     def ensure_active() -> None:
         if generation_attempt_cancelled(attempt_id):
@@ -12559,6 +12603,7 @@ async def _generate_image_asset_unlocked(
         ensure_active()
         progress.update(PHASE_UPLOAD, completed=completed, total=total)
         if completed >= total:
+            persist_attempt_provider_progress(attempt_id, {**submission_snapshot, 'status': 'SUBMITTING'})
             progress.begin(PHASE_SUBMIT, generationRetry=generation_retries)
 
     while True:
@@ -12566,6 +12611,16 @@ async def _generate_image_asset_unlocked(
             ensure_active()
             client_business_id = f"ruyi_img_a{attempt_id or 0}_r{generation_retries}"
             submit_task_package = {**submit_task_package, "clientBusinessId": client_business_id}
+            submission_snapshot = {
+                **image_provider_context(), 'status': 'PREPARING',
+                'clientBusinessId': client_business_id if settings.image_provider == 'toapis' else None,
+                'providerRequestId': None, 'providerRequestHistory': provider_request_history,
+                'generationRetries': generation_retries, 'unknownSubmissionRetries': unknown_submission_retries,
+                'recovery': recovery,
+            }
+            # Persist before network activity, including business ID and original
+            # provider scope. A crash after submission can still be reconciled.
+            persist_attempt_provider_progress(attempt_id, submission_snapshot)
             progress.begin(PHASE_PREPARE)
             progress.begin(PHASE_UPLOAD, completed=0, total=image_input_total, generationRetry=generation_retries)
             try:
@@ -12587,6 +12642,7 @@ async def _generate_image_asset_unlocked(
                     and unknown_submission_retries < settings.generation_unknown_submission_retry_limit
                 )
                 snapshot = {
+                    **submission_snapshot,
                     **unknown_snapshot,
                     "providerRequestHistory": provider_request_history,
                     "generationRetries": generation_retries,
@@ -12634,6 +12690,7 @@ async def _generate_image_asset_unlocked(
                     exc.provider_response = snapshot
                     raise exc from lookup_exc
                 payload = {**snapshot, **recovered, "clientBusinessId": client_business_id}
+            payload = {**submission_snapshot, **payload}
             if payload.get("providerRequestId"):
                 provider_request_history.append(str(payload["providerRequestId"]))
             payload = {
@@ -12645,8 +12702,24 @@ async def _generate_image_asset_unlocked(
             persist_attempt_provider_progress(attempt_id, payload)
 
         if payload.get("status") not in {"SUCCEEDED", "FAILED", "CANCELLED"}:
-            payload = await poll_provider_until_terminal(payload, output_key, attempt_id, progress)
+            try:
+                payload = await poll_provider_until_terminal(payload, output_key, attempt_id, progress)
+            except ImageProviderError as exc:
+                if classify_attempt_error(exc) == ERROR_TASK_NOT_FOUND and recover_by_regenerating('task_not_found'):
+                    prepare_attempt_provider_resubmission(attempt_id, {**payload, 'recovery': recovery})
+                    payload = None
+                    continue
+                raise
         if payload.get("status") == "SUCCEEDED":
+            if not payload.get('outputPath'):
+                try:
+                    payload = await deliver_with_retries(payload, output_key, attempt_id, progress)
+                except ImageProviderError as exc:
+                    if classify_attempt_error(exc) == ERROR_TASK_NOT_FOUND and recover_by_regenerating('result_unavailable'):
+                        prepare_attempt_provider_resubmission(attempt_id, {**payload, 'recovery': recovery})
+                        payload = None
+                        continue
+                    raise
             break
 
         if payload.get("status") in {"FAILED", "CANCELLED"}:
@@ -12661,8 +12734,14 @@ async def _generate_image_asset_unlocked(
             error_code = str(provider_error.get("code") or ERROR_PROVIDER_FAILED)
         else:
             error_code = ERROR_PROVIDER_TIMEOUT
+        if payload.get('status') == 'FAILED' and is_generation_retryable_error(error_code):
+            if recover_by_regenerating('provider_failed'):
+                prepare_attempt_provider_resubmission(attempt_id, {**payload, 'recovery': recovery})
+                payload = None
+                continue
         if (
             payload.get("status") == "FAILED"
+            and not recovery
             and is_generation_retryable_error(error_code)
             and generation_retries < settings.generation_submit_retry_limit
         ):
@@ -12696,8 +12775,6 @@ async def _generate_image_asset_unlocked(
             error_code=error_code,
         )
 
-    if not payload.get("outputPath"):
-        payload = await deliver_with_retries(payload, output_key, attempt_id, progress)
     payload = {
         **payload,
         "submissionMode": "completed",
@@ -12742,7 +12819,7 @@ async def poll_provider_until_terminal(
 ) -> dict[str, Any]:
     """轮询 provider 直到终态或生成预算耗尽；单次查询失败只退避、不判死。"""
     if progress.snapshot.get("current") != PHASE_GENERATE:
-        progress.begin(PHASE_QUEUE)
+        progress.begin('recover' if payload.get('recovery') and not payload['recovery'].get('fallbackUsed') else PHASE_QUEUE)
     deadline = time.time() + settings.generation_image_timeout_seconds
     consecutive_errors = 0
     while time.time() < deadline:
@@ -12792,6 +12869,8 @@ async def poll_provider_until_terminal(
             if duration_seconds is not None:
                 detail["durationSeconds"] = duration_seconds
             progress.begin(PHASE_GENERATE, **detail)
+        if payload.get('status') == 'SUBMITTED':
+            progress.update(PHASE_QUEUE, providerStatus=provider_status)
         if payload.get("status") in {"SUCCEEDED", "FAILED", "CANCELLED"}:
             break
     return payload
@@ -12851,7 +12930,7 @@ async def deliver_with_retries(
             if delivery_error_code != ERROR_DELIVERY_FAILED:
                 raise ImageProviderError(
                     f"provider 已完成，但本地交付阶段失败: {exc}",
-                    getattr(exc, "provider_response", None) or payload,
+                    {**payload, **(getattr(exc, "provider_response", None) or {})},
                     error_code=delivery_error_code,
                 ) from exc
             next_retry = retries + 1
@@ -12876,13 +12955,53 @@ def run_image_provider_submit(task_package: dict[str, Any], output_key: str, on_
     return asyncio.run(get_image_provider().submit(task_package, output_key, on_progress, should_cancel))
 
 
+def image_provider_context(name: str | None = None) -> dict[str, Any]:
+    name = name or settings.image_provider
+    base, key = {
+        'toapis': (settings.toapis_base_url, settings.toapis_api_key),
+        'fal': (settings.gpt_image2_queue_url, settings.fal_key),
+        'apiyi': (settings.apiyi_base_url, settings.apiyi_api_key),
+    }[name]
+    return {'provider': name, 'providerScope': {
+        'endpoint': base.rstrip('/'), 'credentialHash': hashlib.sha256(key.encode()).hexdigest()}}
+
+
+def recorded_image_provider(snapshot: dict[str, Any]) -> str | None:
+    name = snapshot.get('provider')
+    if not name:
+        # Legacy snapshots may predate the explicit provider field.
+        urls = snapshot.get('providerUrls') if isinstance(snapshot.get('providerUrls'), dict) else {}
+        host = urlparse(str(urls.get('statusUrl') or '')).hostname or ''
+        if host in {'toapis.com', 'toapis.cn'} or host.endswith(('.toapis.com', '.toapis.cn')):
+            name = 'toapis'
+        elif host == 'fal.run' or host.endswith('.fal.run'):
+            name = 'fal'
+    return name if name in {'toapis', 'fal', 'apiyi'} else None
+
+
+def recovery_image_provider(snapshot: dict[str, Any]) -> Any:
+    name = recorded_image_provider(snapshot)
+    if name not in {'toapis', 'fal', 'apiyi'}:
+        raise ImageProviderError('原图片平台记录不完整，无法安全查询原任务', snapshot, error_code=ERROR_SYSTEM_ERROR)
+    scope = snapshot.get('providerScope')
+    urls = snapshot.get('providerUrls') if isinstance(snapshot.get('providerUrls'), dict) else {}
+    if name == 'toapis' and urls.get('statusUrl') and not str(urls['statusUrl']).startswith(
+            settings.toapis_base_url.rstrip('/') + '/v1/images/generations/'):
+        raise ImageProviderError('原图片平台的查询地址已变化，请恢复原配置后重试', snapshot, error_code=ERROR_AUTH_FAILED)
+    if isinstance(scope, dict):
+        # API易 recovery is local base64 delivery and needs no credential.
+        if name != 'apiyi' and scope != image_provider_context(name)['providerScope']:
+            raise ImageProviderError('原图片平台的连接配置已变化，请恢复原配置后重试', snapshot, error_code=ERROR_AUTH_FAILED)
+    return get_image_provider(name)
+
+
 def run_image_provider_check(provider_response: dict[str, Any], output_key: str) -> dict[str, Any]:
-    return asyncio.run(get_image_provider().check(provider_refresh_row(provider_response, output_key)))
+    return asyncio.run(recovery_image_provider(provider_response).check(provider_refresh_row(provider_response, output_key)))
 
 
 def run_image_provider_deliver(provider_response: dict[str, Any], output_key: str) -> dict[str, Any]:
     status_response = provider_response.get("providerStatusResponse")
-    provider = get_image_provider("apiyi") if provider_response.get("provider") == "apiyi" else get_image_provider()
+    provider = recovery_image_provider(provider_response)
     return asyncio.run(
         provider.deliver(
             provider_refresh_row(provider_response, output_key),
@@ -12973,7 +13092,7 @@ async def _generate_single_final_image_unlocked(
             with get_db() as db:
                 saved = db.execute("SELECT request_snapshot_json FROM generation_attempts WHERE id = ?", (attempt_id,)).fetchone()
             previous = loads(saved["request_snapshot_json"], {}) if saved else {}
-            if previous.get("prompt") and previous.get("imageInputs"):
+            if isinstance(previous, dict):
                 task_package = previous
         if task_package is None:
             task_package = preparation.get("packages", {}).get(str(image_id))
@@ -13048,7 +13167,7 @@ def preserved_attempt_invocation_mode(attempt_id: int | None) -> str | None:
     snapshot = loads(row["request_snapshot_json"], {}) if row else {}
     invocation = snapshot.get("invocation") if isinstance(snapshot, dict) else None
     mode = invocation.get("mode") if isinstance(invocation, dict) else None
-    return str(mode) if mode in {"manual_retry"} else None
+    return str(mode) if mode in {"manual_retry", "manual_recover", "manual_redeliver"} else None
 
 
 def final_image_generation_state_sql() -> str:
@@ -13327,8 +13446,10 @@ def get_generation_preview(preview_id: int | None) -> dict[str, Any] | None:
 def serialize_result_image(image: Any) -> dict[str, Any]:
     with get_db() as db:
         versions = published_versions(db, image)
+        attempt = db.execute('SELECT * FROM generation_attempts WHERE id=?', (image['active_attempt_id'],)).fetchone()
     return {
         'id': image['id'], 'sortOrder': image['sort_order'], 'shotRole': image['shot_role'],
+        'recoveryRequiresRegeneration': image['status'] == 'FAILED' and recovery_requires_regeneration(attempt),
         'status': image['status'], 'userInstruction': loads(row_value(image, 'user_instruction_json'), {}),
         'asset': get_media_asset_by_id(image['current_asset_id']),
         'activeAttemptId': image['active_attempt_id'], 'activeAttempt': get_attempt_summary(image['active_attempt_id']),

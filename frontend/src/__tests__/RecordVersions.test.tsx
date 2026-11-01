@@ -44,7 +44,7 @@ it('retries the selected image version and refreshes the unified record', async 
   fireEvent.change(screen.getByRole('combobox'), { target: { value: '1' } })
   const group = screen.getByRole('region', { name: '第 2 次成片' })
   fireEvent.click(within(group).getByRole('button', { name: '重新生成' }))
-  await waitFor(() => expect(api.retryResultImage).toHaveBeenCalledWith(200, undefined, 101))
+  await waitFor(() => expect(api.retryResultImage).toHaveBeenCalledWith(200, undefined, 101, true))
   await waitFor(() => expect(changed).toHaveBeenCalledWith(item))
   expect(api.regenerateResultSet).not.toHaveBeenCalled()
 })
@@ -57,4 +57,26 @@ it('continues the selected round and scopes its download', async () => {
   expect(within(group).getByRole('link', { name: '下载本组成片' }).getAttribute('href')).toContain('resultSetId=20')
   fireEvent.click(within(group).getByRole('button', { name: '继续生成' }))
   await waitFor(() => expect(api.continueResultSet).toHaveBeenCalledWith(20))
+})
+
+
+it('recovers the failed attempt without choosing an old published version', async () => {
+  const item = task()
+  vi.mocked(api.getRecord).mockResolvedValue({ item })
+  render(<RecordImagePreview task={item} onChange={vi.fn()} />)
+  const group = screen.getByRole('region', { name: '第 2 次成片' })
+  fireEvent.click(within(group).getByRole('button', { name: '重试' }))
+  await waitFor(() => expect(api.retryResultImage).toHaveBeenCalledWith(200, undefined, undefined, undefined))
+})
+
+it('explains untraceable submissions and explicitly regenerates', async () => {
+  const item = task()
+  item.resultSets![0].images[0].recoveryRequiresRegeneration = true
+  vi.mocked(api.getRecord).mockResolvedValue({ item })
+  render(<RecordImagePreview task={item} onChange={vi.fn()} />)
+  const group = screen.getByRole('region', { name: '第 2 次成片' })
+  expect(within(group).queryByRole('button', { name: '重试' })).not.toBeInTheDocument()
+  expect(within(group).getByText('原任务没有可查询的记录，重新生成可能产生新的费用。')).toBeInTheDocument()
+  fireEvent.click(within(group).getByRole('button', { name: '重新生成' }))
+  await waitFor(() => expect(api.retryResultImage).toHaveBeenCalledWith(200, undefined, 102, true))
 })

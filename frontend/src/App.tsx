@@ -2620,7 +2620,7 @@ function FinalStep({ task, setTask, run, userInstruction, localOperations, start
                     </small>
                   )}
                   {image?.activeAttempt && !isAttemptRunning(image.activeAttempt) && (() => {
-                    const note = !isAdmin && image.activeAttempt.status === 'FAILED'
+                    const note = image.recoveryRequiresRegeneration ? '原任务没有可查询的记录，可重新生成；这可能产生新的费用。' : !isAdmin && image.activeAttempt.status === 'FAILED'
                       ? task?.status === 'FINAL_RUNNING' && image.activeAttempt.errorCode === 'UPLOAD_FAILED'
                         ? '正在等待本轮拍摄完成后恢复'
                         : userErrorText(image.activeAttempt.errorCode, image.activeAttempt.errorMessage)
@@ -2632,7 +2632,7 @@ function FinalStep({ task, setTask, run, userInstruction, localOperations, start
                   })()}
                 </div>
               )}
-              <div><TruncatedText text={`#${index + 1} ${image?.shotRole || '镜头'}`}><b>#{index + 1}</b>{image?.shotRole || '镜头'}</TruncatedText>{image?.asset && <a className="management-icon-action" href={mediaDownloadUrl(assetOriginalSrc(image.asset))} aria-label={`下载镜头 ${index + 1}`}><Download size={15} /></a>}{image?.status === 'FAILED' && image.activeAttempt?.errorCode === 'DELIVERY_FAILED' && <button className="management-icon-action" disabled={!!task && isTaskLockedForGeneration(task)} onClick={() => void run('重新回传成片中...', () => api.redeliverResultImage(image.id), (r: { item: GenerationTask }) => setTask(r.item), { refresh: 'background' })} title="重新回传（图已生成，仅重新拉取，不消耗生成额度）" aria-label={`重新回传镜头 ${index + 1}`}><RefreshCw size={14} /></button>}{image && !['QUEUED', 'RUNNING'].includes(image.status) && <button className="task-icon-action" disabled={!!task && isTaskLockedForGeneration(task)} onClick={() => void run('单张重新生成中...', () => api.retryResultImage(image.id, userInstruction), (r: { item: GenerationTask }) => setTask(r.item), { refresh: 'background' })} title="重新生成" aria-label={`重新生成镜头 ${index + 1}`}><RotateCcw size={14} /></button>}</div>
+              <div><TruncatedText text={`#${index + 1} ${image?.shotRole || '镜头'}`}><b>#{index + 1}</b>{image?.shotRole || '镜头'}</TruncatedText>{image?.asset && <a className="management-icon-action" href={mediaDownloadUrl(assetOriginalSrc(image.asset))} aria-label={`下载镜头 ${index + 1}`}><Download size={15} /></a>}{image && !['QUEUED', 'RUNNING'].includes(image.status) && <button className="task-icon-action" disabled={!!task && isTaskLockedForGeneration(task)} onClick={() => void run(image.status === 'FAILED' && !image.recoveryRequiresRegeneration ? '正在查找原结果...' : '单张重新生成中...', () => api.retryResultImage(image.id, image.status === 'FAILED' ? undefined : userInstruction, undefined, !!image.recoveryRequiresRegeneration), (r: { item: GenerationTask }) => setTask(r.item), { refresh: 'background' })} title={image.status === 'FAILED' ? image.recoveryRequiresRegeneration ? '无法确认原任务，重新生成可能产生新的生成费用' : '重试：优先找回原结果，确认无法恢复后重新生成' : '重新生成'} aria-label={`${image.status === 'FAILED' && !image.recoveryRequiresRegeneration ? '重试' : '重新生成'}镜头 ${index + 1}`}><RotateCcw size={14} /></button>}</div>
             </div>
           ))}
           </div></div>
@@ -8761,6 +8761,7 @@ function AIOperationCard({ operation, now, compact, index, onOpenTechnicalDetail
 }
 
 const ATTEMPT_PHASE_LABELS: Record<string, string> = {
+  recover: '查找原结果',
   prepare: '准备',
   upload: '导入',
   submit: '提交',
@@ -9041,7 +9042,7 @@ type ResultShot = NonNullable<GenerationTask['resultSet']>['images'][number]
 
 function RecordShot({ image, disabled, onRetry, onOpen }: {
   image: ResultShot; disabled: boolean
-  onRetry: (versionId?: number) => void
+  onRetry: (versionId?: number, forceRegenerate?: boolean) => void
   onOpen: (asset: MediaAsset) => void
 }) {
   const [selectedAsset, setSelectedAsset] = useState<number | null>(null)
@@ -9058,8 +9059,10 @@ function RecordShot({ image, disabled, onRetry, onOpen }: {
     </select>}
     <div className="record-shot-actions">
       {asset && <a className="management-action button-link" href={mediaDownloadUrl(assetOriginalSrc(asset))}>下载</a>}
-      <button className="management-action" disabled={disabled || selected?.canRegenerate === false || ['QUEUED', 'RUNNING'].includes(image.status)} onClick={() => onRetry(selected?.id ?? undefined)}>重新生成</button>
+      {image.status === 'FAILED' && !image.recoveryRequiresRegeneration && <button className="management-action" disabled={disabled} title="优先找回原结果，确认无法恢复后重新生成" onClick={() => onRetry()}>重试</button>}
+      {(image.status !== 'FAILED' || !!asset || image.recoveryRequiresRegeneration) && <button className="management-action" title={image.recoveryRequiresRegeneration ? '无法确认原任务，重新生成可能产生新的生成费用' : '使用所选版本的拍摄要求重新生成'} disabled={disabled || selected?.canRegenerate === false || ['QUEUED', 'RUNNING'].includes(image.status)} onClick={() => onRetry(selected?.id ?? undefined, true)}>重新生成</button>}
     </div>
+    {image.recoveryRequiresRegeneration && <small>原任务没有可查询的记录，重新生成可能产生新的费用。</small>}
     {image.status === 'FAILED' && asset && <small>本次生成失败，已保留成功图片</small>}
     {selected?.canRegenerate === false && <small>拍摄信息不完整，可回到摄影棚重新一键成片</small>}
   </div>
@@ -9098,7 +9101,7 @@ export function RecordImagePreview({ task, onChange }: { task: GenerationTask; o
       <h4>第 {groups.length - index} 次成片</h4>
       {group.createdAt && <small>{new Date(group.createdAt).toLocaleString('zh-CN')}</small>}
       {!!group.selectedMaterials?.length && <p className="edit-hint">搭配：{group.selectedMaterials.map((garment) => garment.code).join('、')}</p>}
-      <div className="record-shot-grid">{group.images.map((image) => <RecordShot key={image.id} image={image} disabled={disabled} onOpen={open} onRetry={(versionId) => void perform(() => api.retryResultImage(image.id, undefined, versionId))} />)}</div>
+      <div className="record-shot-grid">{group.images.map((image) => <RecordShot key={image.id} image={image} disabled={disabled} onOpen={open} onRetry={(versionId, forceRegenerate) => void perform(() => api.retryResultImage(image.id, undefined, versionId, forceRegenerate))} />)}</div>
       <div className="record-group-actions">
         <a className="management-action button-link" href={finalImageArchiveUrl([task.id], group.id)}>下载本组成片</a>
         <button className="management-action" disabled={disabled} onClick={() => void perform(() => api.regenerateResultSet(group.id))}>整组重新生成</button>

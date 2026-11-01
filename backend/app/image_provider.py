@@ -20,6 +20,7 @@ from .generation_progress import (
     ERROR_DELIVERY_FAILED,
     ERROR_INVALID_REQUEST,
     ERROR_SUBMISSION_UNKNOWN,
+    ERROR_TASK_NOT_FOUND,
     ERROR_SYSTEM_ERROR,
     ERROR_UPLOAD_FAILED,
     GenerationPhaseError,
@@ -367,14 +368,28 @@ class GPTImage2ToapisProvider(ImageGenerationProvider):
         if not task_id:
             return {"status": "FAILED", "providerStatus": "MISSING_TASK_ID", "error": "缺少 toapis task id"}
 
-        with toapis_concurrency_slot():
-            status_response = get_json(
-                toapis_url(f"/v1/images/generations/{task_id}"),
-                settings.toapis_api_key,
-                timeout=60,
-                auth_scheme="Bearer",
-                error_label="GPT Image-2 toapis 状态查询失败",
-            )
+        try:
+            with toapis_concurrency_slot():
+                status_response = get_json(
+                    toapis_url(f"/v1/images/generations/{task_id}"),
+                    settings.toapis_api_key,
+                    timeout=60,
+                    auth_scheme="Bearer",
+                    error_label="GPT Image-2 toapis 状态查询失败",
+                )
+        except ImageProviderError as exc:
+            if exc.error_code == ERROR_TASK_NOT_FOUND:
+                envelope = exc.provider_response.get('providerResponse') or {}
+                error = envelope.get('error') if isinstance(envelope, dict) else None
+                error = error if isinstance(error, dict) else envelope
+                # A proxy/router HTML 404 is not proof of a missing task.
+                if not isinstance(error, dict) or not (
+                    error.get('code') == 'task_not_found'
+                    or str(error.get('message', '')).strip().lower() == 'task not found'
+                ):
+                    raise ImageProviderError('平台查询地址返回了无法确认的 404', exc.provider_response,
+                                             error_code=ERROR_SYSTEM_ERROR) from exc
+            raise
         provider_status = str(status_response.get("status") or "").lower()
         resolved_task_id = status_response.get("id") or task_id
         next_status = map_toapis_status(provider_status)
@@ -401,8 +416,40 @@ class GPTImage2ToapisProvider(ImageGenerationProvider):
             status_response = refreshed.get("providerStatusResponse") or {}
             output_url = extract_toapis_output_url(status_response)
         if not output_url:
+            if refreshed.get('status') == 'SUCCEEDED' and toapis_result_expired(status_response):
+                raise ImageProviderError('平台结果已过期且没有可获取的图片',
+                                         error_code=ERROR_TASK_NOT_FOUND)
             raise GenerationPhaseError(f"toapis response 缺少图片 URL: {status_response}", ERROR_DELIVERY_FAILED)
-        return store_delivered_image(str(image_row["output_path"]), str(output_url), status_response)
+        try:
+            return store_delivered_image(str(image_row["output_path"]), str(output_url), status_response)
+        except GenerationPhaseError as exc:
+            if exc.error_code != ERROR_DELIVERY_FAILED:
+                raise
+            # A saved result URL can expire independently of the task. Refresh
+            # the task before declaring the result unavailable or downloading again.
+            refreshed = await self.check(image_row)
+            response = refreshed.get('providerStatusResponse') or {}
+            latest_url = extract_toapis_output_url(response)
+            if latest_url:
+                try:
+                    return store_delivered_image(str(image_row['output_path']), latest_url, response)
+                except GenerationPhaseError as delivery_exc:
+                    cause = delivery_exc.__cause__
+                    http_status = getattr(getattr(cause, 'response', None), 'status_code', None) or getattr(cause, 'code', None)
+                    if not (delivery_exc.error_code == ERROR_DELIVERY_FAILED and http_status in {404, 410}
+                            and toapis_result_expired(response)):
+                        raise
+            if refreshed.get('status') == 'SUCCEEDED' and toapis_result_expired(response):
+                raise ImageProviderError('平台结果已过期且没有可获取的图片', refreshed,
+                                         error_code=ERROR_TASK_NOT_FOUND) from exc
+            raise
+
+
+def toapis_result_expired(response: dict[str, Any]) -> bool:
+    try:
+        return bool(response.get('expires_at')) and float(response['expires_at']) <= time.time()
+    except (ValueError, TypeError):
+        return False
 
 
 def store_delivered_image(output_key: str, output_url: str, provider_response: dict[str, Any]) -> dict[str, Any]:
